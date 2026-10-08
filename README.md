@@ -54,7 +54,7 @@ Useful options:
 - `bt_render_d` is the double-precision build.
 - `cuda/bt_render_cuda` takes the same options and runs on the GPU (`--device cpu` switches back).
 
-## Running on another machine (e.g. frabjous)
+## Running the benchmarks
 
 ```sh
 git pull
