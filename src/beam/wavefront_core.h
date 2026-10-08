@@ -24,6 +24,24 @@
 namespace bt {
 inline namespace BT_R4_NS {
 
+// Instrumentation (CUDA builds with -DBT_WF_SIMT): counts warp steps and
+// active lanes at the marked loop heads (cuda/wavefront.cu prints them).
+#if defined(__CUDACC__) && defined(BT_WF_SIMT)
+__device__ unsigned long long g_simt[16];
+#endif
+#if defined(__CUDA_ARCH__) && defined(BT_WF_SIMT)
+__device__ __forceinline__ void simtCount(int k) {
+  unsigned m = __activemask();
+  if ((threadIdx.x & 31) == __ffs(m) - 1) {
+    atomicAdd(&g_simt[2 * k], 1ull);
+    atomicAdd(&g_simt[2 * k + 1], (unsigned long long)__popc(m));
+  }
+}
+#define BT_SIMT(k) simtCount(k)
+#else
+#define BT_SIMT(k)
+#endif
+
 struct WfBeam {
   Real qx[4], qy[4];  // corners on the root's plane (n = 3 or 4)
   uint64_t trail;     // pending far children: bit d for depth d
@@ -52,6 +70,23 @@ struct WfHitPlane {
     C = w->hitC;
   }
 };
+
+// Triangle id of leaf reference k (packed references if the scene has them).
+BT_HD inline int wfTriAt(const SceneView& sv, uint32_t k) {
+  return sv.refs ? int(sv.refs[k].tri) : int(sv.triIndices[k]);
+}
+
+// Setup of leaf reference k; returns the triangle id.
+BT_HD inline int wfTriInfo(const BeamCtx& c, uint32_t k, CoreTriInfo& ti) {
+  if (c.sv.refs) {
+    const TriRef ref = c.sv.refs[k];
+    c.computeTriInfo(ref, ti);
+    return ref.tri;
+  }
+  const int t = int(c.sv.triIndices[k]);
+  c.computeTriInfo(t, ti);
+  return t;
+}
 
 // Expands a record (same arithmetic as BeamCtx::beamGeom / setStatus).
 BT_HD inline void wfExpand(const BeamCtx& c, const WfBeam& r, WfWork& w) {
@@ -96,149 +131,214 @@ BT_HD void wfOutput(const BeamCtx& c, const CoreBeam& b, int root, int tri, Out&
   out.emit(root, p, tri, area);
 }
 
-enum WfTraceResult : int { kWfFinished = 0, kWfSplit = 1 };
+enum WfTraceResult : int { kWfFinished = 0, kWfSplit = 1, kWfContinue = 2 };
+enum WfPhase : int { kWfDescend = 0, kWfTest = 1, kWfClimb = 2 };
 
-// Advances a sub-beam until it is finished (returns kWfFinished; the output
-// went to `out`) or triangle `cursor` of leaf `node` needs a clip (returns
-// kWfSplit; the record is updated in place). `w` must hold wfExpand(r).
+// Where a sub-beam is within wfStep's state machine.
+struct WfStepState {
+  int phase;
+  AABB box;  // box of r.node while descending
+};
+
+// Starts the state machine for a record (wfExpand'ed into w).
+BT_HD inline void wfBegin(const BeamCtx& c, const WfBeam& r, WfStepState& ss) {
+  if (r.cursor < 0) {
+    ss.phase = kWfDescend;
+    ss.box = c.sv.nodeBox[r.node];
+  } else {
+    ss.phase = kWfTest;
+  }
+}
+
+// Cheap steps (kd descent, skipping the excluded triangle, climbing to a
+// pending far child) until the sub-beam has a triangle to test: returns
+// kWfContinue with ss.phase == kWfTest and triangle `cursor` pending, or
+// kWfFinished (no cell left: the beam's output went to `out`).
 template <class Out>
-BT_HD int wfTrace(const BeamCtx& c, WfBeam& r, WfWork& w, Out& out, TraceStats& st) {
+BT_HD int wfAdvance(const BeamCtx& c, WfBeam& r, WfWork& w, WfStepState& ss, Out& out, TraceStats& st) {
   const SceneView& sv = c.sv;
-  const Vec3& O = c.q.plane.O;
-  CoreBeam& B = w.b;
+  const CoreBeam& B = w.b;
   for (;;) {
-    if (r.cursor < 0) {  // descend from r.node to a leaf
-      uint32_t node = r.node;
-      AABB box = sv.nodeBox[node];
-      int depth = r.depth;
-      uint64_t trail = r.trail;
+    if (ss.phase == kWfDescend) {
       for (;;) {
-        const KdNode& kn = sv.nodes[node];
+        const KdNode& kn = sv.nodes[r.node];
         if (kn.isLeaf()) break;
+        BT_SIMT(1);
         st.kdSteps++;
-        const int d = depth++;
+        const int d = r.depth++;
         const int a = kn.axis();
         const Real s = kn.split;
-        const Real Ns = Real(B.sgn[a]) * (s - O[a]);
-        const uint32_t left = node + 1, right = kn.right();
-        AABB lbox = box, rbox = box;
+        const Real Ns = Real(B.sgn[a]) * (s - c.q.plane.O[a]);
+        const uint32_t left = r.node + 1, right = kn.right();
+        AABB lbox = ss.box, rbox = ss.box;
         lbox.hi[a] = s;
         rbox.lo[a] = s;
         const bool sigmaRight = B.sgn[a] > 0;
         // cs: the child the rays move into; co: the child containing O.
         const uint32_t cs = sigmaRight ? right : left, co = sigmaRight ? left : right;
-        if (Ns <= 0) {  // split plane behind (or through) the apex
-          node = cs;
-          box = sigmaRight ? rbox : lbox;
-          continue;
-        }
-        const int dec = c.decide(B, a, Ns, box);
+        int dec = BeamCtx::kFar;
+        if (Ns > 0) dec = c.decide(B, a, Ns, ss.box);  // else the split plane is behind (or through) the apex
         if (dec == BeamCtx::kFar) {
-          node = cs;
-          box = sigmaRight ? rbox : lbox;
+          r.node = cs;
+          ss.box = sigmaRight ? rbox : lbox;
         } else {
-          if (dec == BeamCtx::kBoth) trail |= uint64_t(1) << d;
-          node = co;
-          box = sigmaRight ? lbox : rbox;
+          if (dec == BeamCtx::kBoth) r.trail |= uint64_t(1) << d;
+          r.node = co;
+          ss.box = sigmaRight ? lbox : rbox;
         }
       }
-      r.node = node;
-      r.depth = int16_t(depth);
-      r.trail = trail;
       r.cursor = 0;
       st.leafVisits++;
+      ss.phase = kWfTest;
     }
-    // the leaf's triangles, from the cursor on
-    const KdNode& leaf = sv.nodes[r.node];
-    const uint32_t cnt = leaf.count();
-    const uint32_t* idx = sv.triIndices + leaf.offset;
-    for (uint32_t i = uint32_t(r.cursor); i < cnt; ++i) {
-      const int t = int(idx[i]);
-      if (t == c.q.excludeTri) continue;
-      CoreTriInfo ti;
-      c.computeTriInfo(t, ti);
-      if (!ti.ok) continue;
-      st.triTests++;
-      if (B.hit == t) continue;
-      Line2 L[5];
-      int nl, reason;
-      WfHitPlane hp{&w};
-      const int res = c.classifyTri(B, ti, hp, L, nl, reason);
-      if (res == kTriKeep) continue;
-      if (res == kTriAllIn) {
-        if (c.q.mode == BeamMode::AnyHit) {
-          wfOutput(c, B, r.root, t, out, st);  // occluded
-          return kWfFinished;
-        }
-        c.setStatus(B, t, ti.A, ti.C);
-        w.hitA[0] = ti.A[0];
-        w.hitA[1] = ti.A[1];
-        w.hitA[2] = ti.A[2];
-        w.hitC = ti.C;
-        r.hit = t;
-        continue;
-      }
+    if (ss.phase == kWfTest) {
+      const KdNode& leaf = sv.nodes[r.node];
+      const uint32_t cnt = leaf.count();
+      uint32_t i = uint32_t(r.cursor);
+      while (i < cnt && wfTriAt(sv, leaf.offset + i) == c.q.excludeTri) ++i;
       r.cursor = int32_t(i);
-      return kWfSplit;
+      if (i < cnt) return kWfContinue;
+      ss.phase = kWfClimb;
     }
-    // leaf done: resume at the deepest pending far child the beam overlaps
-    bool resumed = false;
-    while (r.trail != 0) {
+    // climb: resume at the deepest pending far child the beam overlaps
+    for (;;) {
+      if (r.trail == 0) {
+        wfOutput(c, B, r.root, c.q.mode == BeamMode::Nearest ? B.hit : -1, out, st);
+        return kWfFinished;
+      }
+      BT_SIMT(3);
       const int d = highestBit(r.trail);
       uint32_t node = r.node;
       for (int depth = r.depth; depth > d; --depth) {
         node = sv.parent[node];
         st.climbs++;
       }
-      r.node = node;
-      r.depth = int16_t(d);
       r.trail &= (uint64_t(1) << d) - 1;
       const KdNode& kn = sv.nodes[node];
       const uint32_t cs = B.sgn[kn.axis()] > 0 ? kn.right() : node + 1;
+      r.node = node;
+      r.depth = int16_t(d);
       if (c.overlaps(B, sv.nodeBox[cs])) {
         r.node = cs;
         r.depth = int16_t(d + 1);
         r.cursor = -1;
-        resumed = true;
+        ss.phase = kWfDescend;
+        ss.box = sv.nodeBox[cs];
         break;
       }
-    }
-    if (!resumed) {
-      wfOutput(c, B, r.root, c.q.mode == BeamMode::Nearest ? B.hit : -1, out, st);
-      return kWfFinished;
     }
   }
 }
 
-// Clip-piece lists of wfSplit (fixed capacity; overflow aborts the split).
-// (Measured maxima: 10 polygons and 16 pieces, for primary beams; shadow
-// beams stay below 8. A split that needs more abandons its root.)
-constexpr int kWfMaxClip = 12;    // polygons per list
-constexpr int kWfMaxPieces = 24;  // sub-beams out of one split
+// Tests the pending triangle (after wfAdvance returned kWfContinue). Returns
+// kWfContinue, kWfFinished (AnyHit: occluded, output done) or kWfSplit
+// (triangle `cursor` needs a clip).
+template <class Out>
+BT_HD int wfTestOne(const BeamCtx& c, WfBeam& r, WfWork& w, Out& out, TraceStats& st) {
+  BT_SIMT(2);
+  CoreBeam& B = w.b;
+  const KdNode& leaf = c.sv.nodes[r.node];
+  const uint32_t i = uint32_t(r.cursor);
+  r.cursor = int32_t(i + 1);
+  CoreTriInfo ti;
+  const int t = wfTriInfo(c, leaf.offset + i, ti);
+  if (!ti.ok) return kWfContinue;
+  st.triTests++;
+  if (B.hit == t) return kWfContinue;
+  Line2 L[5];
+  int nl, reason;
+  WfHitPlane hp{&w};
+  const int res = c.classifyTri(B, ti, hp, L, nl, reason);
+  if (res == kTriKeep) return kWfContinue;
+  if (res == kTriAllIn) {
+    if (c.q.mode == BeamMode::AnyHit) {
+      wfOutput(c, B, r.root, t, out, st);  // occluded
+      return kWfFinished;
+    }
+    c.setStatus(B, t, ti.A, ti.C);
+    w.hitA[0] = ti.A[0];
+    w.hitA[1] = ti.A[1];
+    w.hitA[2] = ti.A[2];
+    w.hitC = ti.C;
+    r.hit = t;
+    return kWfContinue;
+  }
+  r.cursor = int32_t(i);
+  return kWfSplit;
+}
+
+// True if the current leaf has another triangle to test (skips the excluded
+// one); false when the leaf is done.
+BT_HD inline bool wfMoreInLeaf(const BeamCtx& c, WfBeam& r) {
+  const KdNode& leaf = c.sv.nodes[r.node];
+  const uint32_t cnt = leaf.count();
+  uint32_t i = uint32_t(r.cursor);
+  while (i < cnt && wfTriAt(c.sv, leaf.offset + i) == c.q.excludeTri) ++i;
+  r.cursor = int32_t(i);
+  return i < cnt;
+}
+
+// Advances a sub-beam until it is finished (returns kWfFinished; the output
+// went to `out`) or triangle `cursor` of leaf `node` needs a clip (returns
+// kWfSplit; the record is updated in place). `w` must hold wfExpand(r).
+// This visits exactly the cells and triangles of BeamCore with the restart
+// trail.
+template <class Out>
+BT_HD int wfTrace(const BeamCtx& c, WfBeam& r, WfWork& w, Out& out, TraceStats& st) {
+  WfStepState ss;
+  wfBegin(c, r, ss);
+  for (;;) {
+    if (wfAdvance(c, r, w, ss, out, st) == kWfFinished) return kWfFinished;
+    const int res = wfTestOne(c, r, w, out, st);
+    if (res != kWfContinue) return res;
+  }
+}
+
+// Clip-piece lists of a split (fixed capacity; overflow abandons the root).
+// Clipping a beam (<= 4 corners) by one line gives pieces of <= 5 vertices,
+// and pentagons are split before the next line, so stored pieces have <= 5.
+// (Measured maxima: 10 pieces per list for primary beams; shadow beams stay
+// below 8.)
+constexpr int kWfMaxClip = 12;
+
+struct WfPoly5 {
+  Real x[5], y[5];
+  int n;
+};
 
 struct WfClipSink {
-  Poly2 p[2][kWfMaxClip];
+  WfPoly5 p[2][kWfMaxClip];
   int n[2] = {0, 0};
   BT_HD bool push(int l, const Poly2& q) {
-    if (n[l] >= kWfMaxClip) return false;
-    p[l][n[l]++] = q;
+    if (n[l] >= kWfMaxClip || q.n > 5) return false;
+    WfPoly5& d = p[l][n[l]++];
+    d.n = q.n;
+    for (int i = 0; i < q.n; ++i) {
+      d.x[i] = q.x[i];
+      d.y[i] = q.y[i];
+    }
     return true;
+  }
+  BT_HD void get(int l, int i, Poly2& q) const {
+    const WfPoly5& d = p[l][i];
+    q.n = d.n;
+    for (int k = 0; k < d.n; ++k) {
+      q.x[k] = d.x[k];
+      q.y[k] = d.y[k];
+    }
   }
 };
 
-// Clips the sub-beam by triangle `cursor` of its leaf (wfTrace returned
-// kWfSplit). Writes the pieces that continue (at the next triangle) to
-// pieces[0..np) and sends finished ones (AnyHit: occluded) to `out`. If no
-// piece changes status (nothing measurable is hit) the beam continues
-// unchanged as the single piece. Returns false on overflow of the fixed lists.
-template <class Out>
-BT_HD bool wfSplit(const BeamCtx& c, const WfBeam& r, WfWork& w, bool orderEdges, WfClipSink& sink, Out& out,
-                   TraceStats& st, WfBeam* pieces, int& np) {
-  np = 0;
+// Split, phase 1: clips the sub-beam by triangle `cursor` of its leaf (after
+// wfTrace returned kWfSplit) into `sink`. `commit` is false if no piece
+// changes status (nothing measurable is hit): the beam then continues
+// unchanged. `slots` receives the number of records phase 2 writes. Returns
+// false if a fixed list overflowed.
+BT_HD inline bool wfSplitClip(const BeamCtx& c, const WfBeam& r, WfWork& w, bool orderEdges, WfClipSink& sink,
+                              TraceStats& st, bool& commit, int& slots) {
   const KdNode& leaf = c.sv.nodes[r.node];
-  const int t = int(c.sv.triIndices[leaf.offset + uint32_t(r.cursor)]);
   CoreTriInfo ti;
-  c.computeTriInfo(t, ti);
+  wfTriInfo(c, leaf.offset + uint32_t(r.cursor), ti);
   Line2 L[5];
   int nl, reason;
   WfHitPlane hp{&w};
@@ -246,20 +346,46 @@ BT_HD bool wfSplit(const BeamCtx& c, const WfBeam& r, WfWork& w, bool orderEdges
   sink.n[0] = sink.n[1] = 0;
   if (!c.clipTri(w.b, L, nl, orderEdges, sink, st.fiveSplits)) return false;
   Real newArea = 0;
-  for (int i = 0; i < sink.n[1]; ++i) newArea += sink.p[1][i].area();
+  Poly2 q;
+  for (int i = 0; i < sink.n[1]; ++i) {
+    sink.get(1, i, q);
+    newArea += q.area();
+  }
+  commit = newArea >= c.minArea;
+  slots = 1;
+  if (commit) {
+    slots = 0;
+    const int lists = c.q.mode == BeamMode::AnyHit ? 1 : 2;  // AnyHit: hit pieces are output, not queued
+    for (int l = 0; l < lists; ++l)
+      for (int i = 0; i < sink.n[l]; ++i) slots += sink.p[l][i].n == 5 ? 2 : 1;
+  }
+  return true;
+}
+
+// Split, phase 2: writes the `slots` continuing records (at the next triangle
+// of the leaf) to dst[0..slots) - a record with n = 0 for each piece dropped
+// as a sliver - and sends finished pieces (AnyHit: occluded) to `out`.
+template <class Out>
+BT_HD void wfSplitEmit(const BeamCtx& c, const WfBeam& r, const WfWork& w, const WfClipSink& sink, bool commit,
+                       Out& out, TraceStats& st, WfBeam* dst) {
   WfBeam base = r;
   base.cursor = r.cursor + 1;
-  if (!(newArea >= c.minArea)) {  // nothing (measurable) hits: continue unchanged
-    pieces[np++] = base;
-    return true;
+  if (!commit) {
+    dst[0] = base;
+    return;
   }
   st.splits++;
+  const KdNode& leaf = c.sv.nodes[r.node];
+  const int t = wfTriAt(c.sv, leaf.offset + uint32_t(r.cursor));
   const CoreBeam& parent = w.b;
+  int k = 0;
   for (int l = 0; l < 2; ++l) {
     const bool hitNow = l == 1;
+    const bool queued = !(hitNow && c.q.mode == BeamMode::AnyHit);
     const int hit = hitNow ? t : parent.hit;
     for (int i = 0; i < sink.n[l]; ++i) {
-      const Poly2& p0 = sink.p[l][i];
+      Poly2 p0;
+      sink.get(l, i, p0);
       Poly2 sub[2];
       int ns = 1;
       if (p0.n == 5) {
@@ -269,27 +395,28 @@ BT_HD bool wfSplit(const BeamCtx& c, const WfBeam& r, WfWork& w, bool orderEdges
       } else {
         sub[0] = p0;
       }
-      for (int k = 0; k < ns; ++k) {
+      for (int j = 0; j < ns; ++j) {
         CoreBeam nb;
         Real dropped = 0;
-        if (!c.beamGeom(sub[k], parent.sgn, nb, dropped)) {
+        const bool ok = c.beamGeom(sub[j], parent.sgn, nb, dropped);
+        if (!ok) {
           st.droppedArea += double(dropped);
           out.dropped(r.root, dropped);
-          continue;
-        }
-        if (hitNow && c.q.mode == BeamMode::AnyHit) {
+        } else if (!queued) {
           wfOutput(c, nb, r.root, t, out, st);  // occluded piece: done
-          continue;
         }
-        if (np >= kWfMaxPieces) return false;
-        WfBeam& pr = pieces[np++];
+        if (!queued) continue;
+        WfBeam& pr = dst[k++];
         pr = base;
-        wfStoreGeom(nb, pr);
-        pr.hit = hit;
+        if (ok) {
+          wfStoreGeom(nb, pr);
+          pr.hit = hit;
+        } else {
+          pr.n = 0;  // dropped sliver
+        }
       }
     }
   }
-  return true;
 }
 
 // Pre-splits a root polygon (BeamCore::addRoot) into records queued at the kd

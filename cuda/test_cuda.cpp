@@ -151,3 +151,43 @@ TEST(cuda_primary_and_point_shadows_match_cpu) {
     CHECK(shadowDiff == 0);
   }
 }
+
+TEST(cuda_wavefront_deterministic_and_exact_under_tiny_budgets) {
+  if (!gpuAvailable()) return;
+  Scene s = makeScene("mesh procedural plant\n");
+  KdTree tree;
+  KdBuildParams kp;
+  kp.costIntersect = Real(0.4);
+  tree.build(s, kp);
+  View v;
+  v.eye = Vec3(2.6f, 1.7f, 3.4f);
+  v.target = Vec3(0, 0.55f, 0);
+  v.fovY = 45;
+  AreaLight L;
+  L.c = Vec3(0.9f, 2.8f, 0.7f);
+  L.U = Vec3(0.4f, 0, 0);
+  L.V = Vec3(0, 0, 0.4f);
+  Camera cam = Camera::make(v, Vec3(0, 1, 0), 128, 128);
+  SoftOptions opt;
+  GpuRenderer g(s, tree);
+  SoftResult a, b, small, cpu;
+  g.softShadows(cam, L, opt, a);
+  g.softShadows(cam, L, opt, b);
+  // Fixed-point accumulation: the result does not depend on scheduling.
+  CHECK_MSG(a.vis == b.vis && a.E == b.E, "two runs differ");
+  // Budget 4 and small queues: many pixels go back to the CPU, and the
+  // admission rule must still never overflow a queue.
+  g.wfBudget = 4;
+  g.wfCapacity = 4096;
+  g.softShadows(cam, L, opt, small);
+  softShadows(s, tree, cam, L, opt, cpu);
+  int fallback = g.lastOverflowPixels, bad = 0, n = 0;
+  for (size_t k = 0; k < cpu.vis.size(); ++k) {
+    if (cpu.vis[k] < 0) continue;
+    ++n;
+    bad += std::fabs(double(cpu.vis[k]) - double(small.vis[k])) > 0.02;
+  }
+  fprintf(stderr, "    %d of %d pixels recomputed on the CPU, %d rounds\n", fallback, n, g.lastRounds);
+  CHECK(fallback > 100 && fallback < n);
+  CHECK_MSG(bad == 0, "%d pixels differ", bad);
+}

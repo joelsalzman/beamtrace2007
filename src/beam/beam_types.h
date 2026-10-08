@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "accel/kdtree.h"
 #include "beam/beam_geom.h"
@@ -71,6 +72,16 @@ struct OutBeam {
   Real area;
 };
 
+// A triangle as referenced from a kd leaf, packed for one wide load (the
+// wavefront engines): vertices, unit normal, global vertex indices (which
+// fix the canonical orientation of shared edges) and the triangle id.
+struct alignas(16) TriRef {
+  Vec3 v[3];
+  Vec3 n;
+  uint32_t vi[3];
+  int32_t tri;
+};
+
 // Raw pointers to the scene and kd-tree (host or device memory).
 struct SceneView {
   const Vec3* pos = nullptr;
@@ -80,9 +91,25 @@ struct SceneView {
   const uint32_t* triIndices = nullptr;
   const uint32_t* parent = nullptr;  // kd node parents (restart-trail traversal)
   const AABB* nodeBox = nullptr;     // kd node boxes
+  const TriRef* refs = nullptr;      // optional: packed triangles in leaf order (parallel to triIndices)
   AABB bounds;
   int numTris = 0;
 };
+
+// Packed triangles for every leaf reference (in triIndices order).
+inline void buildTriRefs(const Scene& s, const KdTree& t, std::vector<TriRef>& refs) {
+  refs.resize(t.triIndices.size());
+  for (size_t i = 0; i < refs.size(); ++i) {
+    const uint32_t tri = t.triIndices[i];
+    TriRef& r = refs[i];
+    for (int k = 0; k < 3; ++k) {
+      r.vi[k] = s.tris[tri][size_t(k)];
+      r.v[k] = s.pos[r.vi[k]];
+    }
+    r.n = s.triN[tri];
+    r.tri = int32_t(tri);
+  }
+}
 
 inline SceneView makeSceneView(const Scene& s, const KdTree& t) {
   SceneView v;

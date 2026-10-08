@@ -47,6 +47,7 @@ struct CoreTriInfo {
   Real A[3];   // a_T(q) = A0 qx + A1 qy + A2 = n_T . dir(q)
   Real C;      // n_T . (v0 - O); t_T(q) = C / a_T(q)
   Vec3 r[3];   // vertices relative to O
+  Vec3 n;      // unit normal
 };
 
 struct CoreWork {
@@ -236,11 +237,26 @@ struct BeamCtx {
   }
 
   BT_HD void computeTriInfo(int t, CoreTriInfo& ti) const {
-    ti.tri = t;
-    ti.ok = false;
     const uint32_t* T = sv.tri3 + 3 * size_t(t);
     const Vec3& O = q.plane.O;
     for (int k = 0; k < 3; ++k) ti.r[k] = sv.pos[T[k]] - O;
+    ti.n = sv.triN[t];
+    triSetup(t, T, ti);
+  }
+
+  // The same from a packed triangle reference (bitwise the same result).
+  BT_HD void computeTriInfo(const TriRef& ref, CoreTriInfo& ti) const {
+    const Vec3& O = q.plane.O;
+    for (int k = 0; k < 3; ++k) ti.r[k] = ref.v[k] - O;
+    ti.n = ref.n;
+    triSetup(ref.tri, ref.vi, ti);
+  }
+
+  // Edge lines and plane of triangle t given ti.r (vertices relative to O),
+  // ti.n and the global vertex indices T.
+  BT_HD void triSetup(int t, const uint32_t* T, CoreTriInfo& ti) const {
+    ti.tri = t;
+    ti.ok = false;
     // Edge planes through O, computed in canonical vertex order so the two
     // triangles sharing an edge get exactly negated planes (no cracks).
     Vec3 m[3];
@@ -259,7 +275,10 @@ struct BeamCtx {
     const BeamPlane& P = q.plane;
     for (int k = 0; k < 3; ++k)
       ti.edge[k] = makeLine(s * dot(m[k], P.u), s * dot(m[k], P.v), s * dot(m[k], P.d), ext);
-    hitPlane(t, ti.A, ti.C);
+    ti.A[0] = dot(ti.n, P.u);
+    ti.A[1] = dot(ti.n, P.v);
+    ti.A[2] = dot(ti.n, P.d);
+    ti.C = dot(ti.n, ti.r[0]);
     ti.ok = true;
   }
 
@@ -278,7 +297,7 @@ struct BeamCtx {
   // plane F (t_T < t_F). With t_k(q) = C_k / a_k(q) and sign(a_k) = sign(C_k)
   // wherever the rays hit, t_T < t_F <=> sign(C_T C_F) (C_F a_T(q) - C_T a_F(q)) > 0.
   BT_HD Line2 closerLine(const CoreTriInfo& T, const Real* AF, Real CF, const Vec3& nF, int fId) const {
-    const Vec3& nT = sv.triN[T.tri];
+    const Vec3& nT = T.n;
     Real cosang = dot(nT, nF);
     Real aC = T.C < 0 ? -T.C : T.C, aF = CF < 0 ? -CF : CF;
     Real scaleC = bmax(aC, aF);

@@ -48,12 +48,22 @@ class GpuRenderer {
   // direct-mapped mailboxes in local memory it costs more than it saves).
   bool useMailbox = false;
 
+  // Soft shadows: the wavefront engine (sub-beams in queues, cuda/wavefront.cu)
+  // or, with useWavefront = false (environment BT_GPU_ENGINE=v1), the first
+  // port's one thread per pixel.
+  bool useWavefront = true;
+  int wfBudget = 256;                     // live sub-beams per pixel before it goes to the CPU
+  size_t wfCapacity = size_t(1) << 22;    // sub-beams per queue (3 queues of 64 B records)
+  int lastRounds = 0, lastMaxQueue = 0;
+
   int lastOverflowPixels = 0;     // pixels recomputed on the CPU
   double lastFallbackSeconds = 0;
   double lastKernelSeconds = 0;   // shadow-beam kernel only
 
+ public:
+  struct Impl;  // device state (cuda/gpu_common.cuh)
+
  private:
-  struct Impl;
   Impl* impl_;
   const Scene& scene_;
   const KdTree& tree_;

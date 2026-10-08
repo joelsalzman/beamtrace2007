@@ -1,25 +1,16 @@
-// CUDA port: primary rays + exact soft-shadow beams, one thread per pixel.
-#include <cuda_runtime.h>
-
-#include <cstdio>
+// CUDA port: primary rays, the soft-shadow driver, and the first port's
+// kernels (one thread per root beam running BeamCore depth-first; still used
+// for primary visibility and point shadows, and for soft shadows with
+// BT_GPU_ENGINE=v1). Soft shadows use the wavefront engine (wavefront.cu).
 #include <algorithm>
-#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "beam/beam_core.h"
-#include "cuda/gpu_render.h"
+#include "cuda/gpu_common.cuh"
 #include "ray/ray_core.h"
 #include "render/soft_core.h"
 #include "util/misc.h"
-
-#define BT_CUDA_CHECK(x)                                                                   \
-  do {                                                                                     \
-    cudaError_t e_ = (x);                                                                  \
-    if (e_ != cudaSuccess) {                                                               \
-      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); \
-      std::abort();                                                                        \
-    }                                                                                      \
-  } while (0)
 
 namespace bt {
 
@@ -444,14 +435,6 @@ __global__ void pointShadowKernel(SceneView sv, BeamPlane camPlane, GpuCam cam, 
   addStats(gstats, core.stats);
 }
 
-template <class T>
-T* upload(const T* data, size_t n) {
-  T* d = nullptr;
-  BT_CUDA_CHECK(cudaMalloc(&d, sizeof(T) * (n ? n : 1)));
-  if (n) BT_CUDA_CHECK(cudaMemcpy(d, data, sizeof(T) * n, cudaMemcpyHostToDevice));
-  return d;
-}
-
 
 // Packs per-item output slices (count[i] entries at i * cap) into a dense array.
 __global__ void compactKernel(const OutBeam* in, int cap, const int* count, const int* offset, int n, OutBeam* out) {
@@ -502,15 +485,6 @@ bool gpuAvailable(GpuInfo* info) {
   return true;
 }
 
-struct GpuRenderer::Impl {
-  SceneView sv;  // device pointers
-  Vec3* dPos = nullptr;
-  uint32_t* dTri = nullptr;
-  Vec3* dTriN = nullptr;
-  KdNode* dNodes = nullptr;
-  uint32_t* dIdx = nullptr;
-};
-
 GpuRenderer::GpuRenderer(const Scene& scene, const KdTree& tree) : impl_(new Impl), scene_(scene), tree_(tree) {
   Impl& I = *impl_;
   I.dPos = upload(scene.pos.data(), scene.pos.size());
@@ -518,15 +492,26 @@ GpuRenderer::GpuRenderer(const Scene& scene, const KdTree& tree) : impl_(new Imp
   I.dTriN = upload(scene.triN.data(), scene.triN.size());
   I.dNodes = upload(tree.nodes.data(), tree.nodes.size());
   I.dIdx = upload(tree.triIndices.data(), tree.triIndices.size());
+  I.dParent = upload(tree.parent.data(), tree.parent.size());
+  I.dNodeBox = upload(tree.nodeBox.data(), tree.nodeBox.size());
+  {
+    std::vector<TriRef> refs;
+    buildTriRefs(scene, tree, refs);
+    I.dRefs = upload(refs.data(), refs.size());
+  }
   I.sv.pos = I.dPos;
   I.sv.tri3 = I.dTri;
   I.sv.triN = I.dTriN;
   I.sv.nodes = I.dNodes;
   I.sv.triIndices = I.dIdx;
+  I.sv.parent = I.dParent;
+  I.sv.nodeBox = I.dNodeBox;
+  I.sv.refs = I.dRefs;
   I.sv.bounds = tree.bounds;
   I.sv.numTris = scene.numTris();
   // Local memory for the per-thread beam storage.
   BT_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 4096));
+  if (const char* e = getenv("BT_GPU_ENGINE")) useWavefront = std::strcmp(e, "v1") != 0;
 }
 
 GpuRenderer::~GpuRenderer() {
@@ -535,6 +520,10 @@ GpuRenderer::~GpuRenderer() {
   cudaFree(impl_->dTriN);
   cudaFree(impl_->dNodes);
   cudaFree(impl_->dIdx);
+  cudaFree(impl_->dParent);
+  cudaFree(impl_->dNodeBox);
+  cudaFree(impl_->dRefs);
+  wfDestroyBuffers(impl_->wf);
   delete impl_;
 }
 
@@ -580,23 +569,37 @@ void GpuRenderer::softShadows(const Camera& cam, const AreaLight& light, const S
   primaryKernel<<<pg, pb>>>(I.sv, gc, dTriPix, dX, dN, dStats);
   BT_CUDA_CHECK(cudaGetLastError());
   BT_CUDA_CHECK(cudaEventRecord(e1));
-  const int bs = 32;
-  int dev = 0, sms = 1, perSM = 1;
-  cudaGetDevice(&dev);
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-  // The per-thread beam storage lives in local memory: give L1 the largest
-  // share of the unified L1/shared memory.
-  cudaFuncSetAttribute(softKernel, cudaFuncAttributePreferredSharedMemoryCarveout, 0);
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&perSM, softKernel, bs, 0);
-  int blocks = std::max(1, sms * std::max(1, perSM));
-  if (const char* e = getenv("BT_GPU_BLOCKS")) blocks = std::max(1, atoi(e));
-  if (getenv("BT_GPU_DEBUG")) fprintf(stderr, "  launch: %d blocks x %d threads (%d per SM)\n", blocks, bs, perSM);
-  int* dCounter;
-  BT_CUDA_CHECK(cudaMalloc(&dCounter, sizeof(int)));
-  BT_CUDA_CHECK(cudaMemset(dCounter, 0, sizeof(int)));
-  softKernel<<<blocks, bs>>>(I.sv, light, offset, W, H, dTriPix, dX, dN, opt.exact, opt.mailbox && useMailbox, dVis, dE, dEu,
-                             dOver, dStats + kNumStats, dCounter);
-  BT_CUDA_CHECK(cudaGetLastError());
+  int* dCounter = nullptr;
+  WfRunInfo wi;
+  if (useWavefront) {
+    WfConfig wc;
+    wc.budget = wfBudget;
+    wc.capacity = wfCapacity;
+    wfSoftShadows(I, wc, light, offset, W, H, dTriPix, dX, dN, opt.exact, dVis, dE, dEu, dOver, wi);
+    lastRounds = wi.rounds;
+    lastMaxQueue = wi.maxQueue;
+    if (getenv("BT_GPU_DEBUG"))
+      fprintf(stderr, "  wavefront: %d rounds, max queue %d, %d roots abandoned, %llu trace / %llu split entries, %llu splits\n",
+              wi.rounds, wi.maxQueue, wi.killedRoots, wi.traceItems, wi.splitItems,
+              (unsigned long long)wi.stats.splits);
+  } else {
+    const int bs = 32;
+    int dev = 0, sms = 1, perSM = 1;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    // The per-thread beam storage lives in local memory: give L1 the largest
+    // share of the unified L1/shared memory.
+    cudaFuncSetAttribute(softKernel, cudaFuncAttributePreferredSharedMemoryCarveout, 0);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&perSM, softKernel, bs, 0);
+    int blocks = std::max(1, sms * std::max(1, perSM));
+    if (const char* e = getenv("BT_GPU_BLOCKS")) blocks = std::max(1, atoi(e));
+    if (getenv("BT_GPU_DEBUG")) fprintf(stderr, "  launch: %d blocks x %d threads (%d per SM)\n", blocks, bs, perSM);
+    BT_CUDA_CHECK(cudaMalloc(&dCounter, sizeof(int)));
+    BT_CUDA_CHECK(cudaMemset(dCounter, 0, sizeof(int)));
+    softKernel<<<blocks, bs>>>(I.sv, light, offset, W, H, dTriPix, dX, dN, opt.exact, opt.mailbox && useMailbox, dVis,
+                               dE, dEu, dOver, dStats + kNumStats, dCounter);
+    BT_CUDA_CHECK(cudaGetLastError());
+  }
   BT_CUDA_CHECK(cudaEventRecord(e2));
   BT_CUDA_CHECK(cudaEventSynchronize(e2));
   float msPrimary = 0, msSoft = 0;
@@ -638,7 +641,7 @@ void GpuRenderer::softShadows(const Camera& cam, const AreaLight& light, const S
   for (size_t k = 0; k < npix; ++k)
     if (over[k]) todo.push_back(k);
   lastOverflowPixels = int(todo.size());
-  if (getenv("BT_GPU_DEBUG")) {
+  if (getenv("BT_GPU_DEBUG") && !useWavefront) {
     double tot = double(st[kNumStats + kCycTotal]) + 1e-30;
     if (tot > 1) fprintf(stderr, "  cycles: descent %.1f%% leaf %.1f%% advance %.1f%% root %.1f%% (of trace)\n",
             100 * st[kNumStats + kCycDesc] / tot, 100 * st[kNumStats + kCycLeaf] / tot,
@@ -656,16 +659,20 @@ void GpuRenderer::softShadows(const Camera& cam, const AreaLight& light, const S
   lastFallbackSeconds = tf.seconds();
 
   TraceStats ts;
-  ts.kdSteps = st[kNumStats + kKd];
-  ts.leafVisits = st[kNumStats + kLeaf];
-  ts.triTests = st[kNumStats + kTests];
-  ts.hits = st[kNumStats + kHits];
-  ts.splits = st[kNumStats + kSplits];
-  ts.beams = st[kNumStats + kBeamsOut];
-  ts.rootBeams = st[kNumStats + kRoots];
-  ts.presplitBeams = st[kNumStats + kPresplit];
-  ts.mailboxSkips = st[kNumStats + kMailSkips];
-  ts.fiveSplits = st[kNumStats + kFive];
+  if (useWavefront) {
+    ts = wi.stats;
+  } else {
+    ts.kdSteps = st[kNumStats + kKd];
+    ts.leafVisits = st[kNumStats + kLeaf];
+    ts.triTests = st[kNumStats + kTests];
+    ts.hits = st[kNumStats + kHits];
+    ts.splits = st[kNumStats + kSplits];
+    ts.beams = st[kNumStats + kBeamsOut];
+    ts.rootBeams = st[kNumStats + kRoots];
+    ts.presplitBeams = st[kNumStats + kPresplit];
+    ts.mailboxSkips = st[kNumStats + kMailSkips];
+    ts.fiveSplits = st[kNumStats + kFive];
+  }
   ts.add(fstats);
   res.stats.trace = ts;
   res.stats.primarySeconds = msPrimary * 1e-3;

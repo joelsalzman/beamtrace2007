@@ -46,6 +46,7 @@ class WavefrontTracer {
 
  private:
   SceneView sv_;
+  std::vector<TriRef> refs_;
 };
 
 }  // namespace bt

@@ -42,7 +42,10 @@ struct HostPush {
 
 }  // namespace
 
-WavefrontTracer::WavefrontTracer(const Scene& scene, const KdTree& tree) : sv_(makeSceneView(scene, tree)) {}
+WavefrontTracer::WavefrontTracer(const Scene& scene, const KdTree& tree) : sv_(makeSceneView(scene, tree)) {
+  buildTriRefs(scene, tree, refs_);
+  sv_.refs = refs_.data();
+}
 
 void WavefrontTracer::trace(const std::vector<WfRootSpec>& roots, std::vector<WfRootResult>& results) {
   const size_t R = roots.size();
@@ -78,14 +81,13 @@ void WavefrontTracer::trace(const std::vector<WfRootSpec>& roots, std::vector<Wf
   }
 
   WfClipSink sink;
-  WfBeam pieces[kWfMaxPieces];
   while (!traceQ.empty()) {
     ++rounds;
     maxQueue = std::max(maxQueue, traceQ.size());
     splitQ.clear();
     for (WfBeam& r : traceQ) {
       const size_t root = size_t(r.root);
-      if (killed[root]) {
+      if (killed[root] || r.n == 0) {  // abandoned root, or a dropped sliver
         --live[root];
         continue;
       }
@@ -105,18 +107,21 @@ void WavefrontTracer::trace(const std::vector<WfRootSpec>& roots, std::vector<Wf
       }
       WfWork w;
       wfExpand(ctx[root], r, w);
-      int np = 0;
-      bool ok = wfSplit(ctx[root], r, w, orderEdges, sink, out, stats, pieces, np);
+      bool commit = false;
+      int slots = 0;
+      bool ok = wfSplitClip(ctx[root], r, w, orderEdges, sink, stats, commit, slots);
       maxClip = std::max(maxClip, std::max(sink.n[0], sink.n[1]));
-      maxPieces = std::max(maxPieces, np);
-      if (!ok || live[root] - 1 + np > budget) {
+      maxPieces = std::max(maxPieces, slots);
+      if (!ok || live[root] - 1 + slots > budget) {
         --live[root];
         kill(int(root));
         continue;
       }
-      live[root] += np - 1;
+      live[root] += slots - 1;
       maxLive = std::max(maxLive, size_t(live[root]));
-      for (int k = 0; k < np; ++k) next.push_back(pieces[k]);
+      const size_t at = next.size();
+      next.resize(at + size_t(slots));
+      wfSplitEmit(ctx[root], r, w, sink, commit, out, stats, next.data() + at);
     }
     traceQ.swap(next);
   }
