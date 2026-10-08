@@ -1,9 +1,10 @@
 // CUDA port of the beam tracer (host interface; no CUDA types here).
 //
-// Soft shadows run one thread per pixel: a ray-traced primary hit, then one
-// exact shadow beam traced by the same BeamCore as the CPU tracer, with
-// fixed-size per-thread storage. Pixels whose storage overflows are flagged
-// and recomputed on the CPU, so the result is always the exact one.
+// By default all three applications run on the wavefront engine
+// (cuda/wavefront.cu): sub-beams are records in queues in GPU memory, traced
+// and clipped by one thread each, round by round. Roots that exceed their
+// budget of live sub-beams are recomputed on the CPU, so the result is
+// always the exact one. Soft shadows start from a GPU primary-ray pass.
 #pragma once
 
 #include <string>
@@ -34,12 +35,12 @@ class GpuRenderer {
   // beams + CPU fallback.
   void softShadows(const Camera& cam, const AreaLight& light, const SoftOptions& opt, SoftResult& res);
 
-  // Primary visibility: one root beam per `tile` x `tile` pixel tile, one tile
-  // per thread. Returns the hit beams (image-plane polygons). Tiles whose
-  // storage overflows are traced on the CPU.
+  // Primary visibility: one root beam per `tile` x `tile` pixel tile.
+  // Returns the hit beams (image-plane polygons). Abandoned tiles are traced
+  // on the CPU.
   void primary(const Camera& cam, bool cull, std::vector<OutBeam>& hitBeams, RenderStats& rs, int tile = 16);
 
-  // Point-light shadows for the given primary hit beams, one per thread.
+  // Point-light shadows for the given primary hit beams, one root each.
   // Appends shadowed polygons (image plane) like beamPointShadows().
   void pointShadows(const Camera& cam, const std::vector<OutBeam>& primaryHits, const Vec3& light,
                     std::vector<OutBeam>& shadowPolys, RenderStats& rs);

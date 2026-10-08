@@ -521,6 +521,10 @@ GpuRenderer::GpuRenderer(const Scene& scene, const KdTree& tree) : impl_(new Imp
   // Tuning overrides for the wavefront engine.
   if (const char* e = getenv("BT_WF_BUDGET")) wfBudget = std::max(1, atoi(e));
   if (const char* e = getenv("BT_WF_CAPACITY")) wfCapacity = size_t(std::max(1024L, atol(e)));
+  if (useWavefront) {
+    I.wf = wfCreateBuffers();
+    wfReserve(I.wf, wfCapacity);
+  }
 }
 
 GpuRenderer::~GpuRenderer() {

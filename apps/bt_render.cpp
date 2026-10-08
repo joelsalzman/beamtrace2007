@@ -29,7 +29,7 @@ struct Args {
   int rayAA = 1;       // primary rays per pixel for the ray tracer
   int samples = 256;   // shadow rays per pixel (soft shadows)
   int threads = 1;
-  bool exact = false, jitter = true, mailbox = true, trail = false, wire = false, singleLeaf = false, quiet = false;
+  bool exact = false, jitter = true, mailbox = true, trail = false, warmup = false, wire = false, singleLeaf = false, quiet = false;
   bool writePfm = false;
   bool info = false;
   double lightScale = 1;
@@ -48,7 +48,8 @@ void usage() {
           "                 [--method beam|ray] [--res WxH] [--aa N] [--ray-aa N] [--samples N] [--threads N]\n"
           "                 [--exact] [--no-jitter] [--no-mailbox] [--trail] [--light-scale S] [--cull 0|1]\n"
           "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet] [--info]\n"
-          "                 [--device cpu|cuda]  (cuda: soft shadows on the GPU; bt_render_cuda only)\n");
+          "                 [--device cpu|cuda] [--warmup]  (bt_render_cuda only; --warmup renders the first view\n"
+          "                 once untimed so GPU allocations are not timed)\n");
 }
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -77,6 +78,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
     else if (s == "--no-jitter") a.jitter = false;
     else if (s == "--no-mailbox") a.mailbox = false;
     else if (s == "--trail") a.trail = true;
+    else if (s == "--warmup") a.warmup = true;
     else if (s == "--light-scale") a.lightScale = std::atof(next().c_str());
     else if (s == "--cull") a.cull = std::atoi(next().c_str());
     else if (s == "--out") a.out = next();
@@ -201,7 +203,13 @@ int main(int argc, char** argv) {
   }
 #endif
   RayTracer rtr(scene, tree);
-  for (int view = v0; view <= v1; ++view) {
+  // --warmup: render the first view once, untimed and unrecorded (GPU
+  // buffers are allocated on the first frame).
+  const std::string outPrefix = a.out;
+  for (int it = a.warmup ? v0 - 1 : v0; it <= v1; ++it) {
+    const bool warmPass = it < v0;
+    const int view = warmPass ? v0 : it;
+    a.out = warmPass ? std::string() : outPrefix;
     Camera cam = Camera::make(cfg.views[size_t(view)], cfg.up, a.W, a.H);
     RenderStats rs;
     double meanVis = 0;
@@ -331,6 +339,7 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (!a.out.empty()) writePNG(outName(a, view, ".png"), img);
+    if (warmPass) continue;
     const TraceStats& t = rs.trace;
     double px = double(a.W) * a.H;
     if (!a.quiet)

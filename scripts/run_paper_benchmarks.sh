@@ -135,20 +135,37 @@ fi
 rm -f "$OUT/cuda.csv"
 if [ "$CUDA" = 1 ]; then
   echo "== CUDA port"
+  # Default engine: wavefront (sub-beams in queues); BT_GPU_ENGINE=v1: the
+  # first port (one thread per root beam), tagged v1.
   for sc in plant sponza conference building; do
     have $sc || continue
-    "$RC" --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \
+    "$RC" --warmup --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \
        --out "$OUT/img/soft_${sc}_cuda" --pfm --csv "$OUT/cuda.csv" --quiet
     m=$("$BUILD/bt_compare" "$OUT/img/soft_${sc}_beam_vis.pfm" "$OUT/img/soft_${sc}_cuda_vis.pfm")
     echo "$sc,beam_cuda,0,$(echo "$m" | awk '{print $2","$4","$6","$8","$10}')" >> "$OUT/softshadow_errors.csv"
+    BT_GPU_ENGINE=v1 "$RC" --warmup --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \
+       --csv "$OUT/cuda.csv" --quiet --tag v1
     # same frame on all CPU threads, for comparison
     $R --config configs/$sc.cfg --mode softshadow --method beam --res $RES_S --view 0 --threads $(nproc) \
        --csv "$OUT/cuda.csv" --quiet --tag cpu_all_threads
   done
+  for sc in room building plant sponza conference armadillo; do
+    have $sc || continue
+    "$RC" --warmup --config configs/$sc.cfg --mode primary --method beam --res $RES_P --aa 1 --view 0 \
+       --csv "$OUT/cuda.csv" --quiet
+    BT_GPU_ENGINE=v1 "$RC" --warmup --config configs/$sc.cfg --mode primary --method beam --res $RES_P --aa 1 --view 0 \
+       --csv "$OUT/cuda.csv" --quiet --tag v1
+    $R --config configs/$sc.cfg --mode primary --method beam --res $RES_P --aa 1 --view 0 \
+       --csv "$OUT/cuda.csv" --quiet --tag cpu
+  done
   for sc in room building sponza; do
     have $sc || continue
-    "$RC" --config configs/$sc.cfg --mode pointshadow --method beam --res $RES_P --aa 6 --view 0 \
+    "$RC" --warmup --config configs/$sc.cfg --mode pointshadow --method beam --res $RES_P --aa 6 --view 0 \
        --out "$OUT/img/pointshadow_${sc}_cuda" --csv "$OUT/cuda.csv" --quiet
+    BT_GPU_ENGINE=v1 "$RC" --warmup --config configs/$sc.cfg --mode pointshadow --method beam --res $RES_P --aa 1 \
+       --view 0 --csv "$OUT/cuda.csv" --quiet --tag v1
+    $R --config configs/$sc.cfg --mode pointshadow --method beam --res $RES_P --aa 1 --view 0 \
+       --csv "$OUT/cuda.csv" --quiet --tag cpu
   done
 fi
 

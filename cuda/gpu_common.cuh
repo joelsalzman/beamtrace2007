@@ -34,6 +34,8 @@ T* upload(const T* data, size_t n) {
 struct WfBuffers;  // wavefront engine allocations (wavefront.cu)
 WfBuffers* wfCreateBuffers();
 void wfDestroyBuffers(WfBuffers* b);
+// Allocates the sub-beam queues ahead of the first frame.
+void wfReserve(WfBuffers* b, size_t capacity);
 
 struct GpuRenderer::Impl {
   SceneView sv;  // device pointers

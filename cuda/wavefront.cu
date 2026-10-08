@@ -574,15 +574,7 @@ int persistentGrid(K kernel) {
 void prepare(GpuRenderer::Impl& I, const WfConfig& cfg, int R, int statWarps, Params& p) {
   if (!I.wf) I.wf = wfCreateBuffers();
   WfBuffers& B = *I.wf;
-  if (B.capacity != cfg.capacity) {
-    for (WfBeam*& q : B.tq) {
-      if (q) cudaFree(q);
-      BT_CUDA_CHECK(cudaMalloc(&q, sizeof(WfBeam) * cfg.capacity));
-    }
-    if (B.sq) cudaFree(B.sq);
-    BT_CUDA_CHECK(cudaMalloc(&B.sq, sizeof(WfBeam) * cfg.capacity));
-    B.capacity = cfg.capacity;
-  }
+  wfReserve(&B, cfg.capacity);
   if (B.rootCap < size_t(R)) {
     cudaFree(B.roots);
     cudaFree(B.live);
@@ -794,6 +786,18 @@ void downloadPolys(GpuRenderer::Impl& I, const Params& p, const WfState& hs, std
 
 WfBuffers* wfCreateBuffers() { return new WfBuffers(); }
 
+void wfReserve(WfBuffers* b, size_t capacity) {
+  WfBuffers& B = *b;
+  if (B.capacity == capacity) return;
+  for (WfBeam*& q : B.tq) {
+    if (q) cudaFree(q);
+    BT_CUDA_CHECK(cudaMalloc(&q, sizeof(WfBeam) * capacity));
+  }
+  if (B.sq) cudaFree(B.sq);
+  BT_CUDA_CHECK(cudaMalloc(&B.sq, sizeof(WfBeam) * capacity));
+  B.capacity = capacity;
+}
+
 void wfDestroyBuffers(WfBuffers* b) {
   if (!b) return;
   cudaFree(b->tq[0]);
@@ -837,7 +841,9 @@ void wfSoftShadows(GpuRenderer::Impl& I, const WfConfig& cfg, const AreaLight& L
 void wfPrimary(GpuRenderer::Impl& I, const WfConfig& cfg, const Camera& cam, bool cull, int tile,
                std::vector<OutBeam>& hits, std::vector<int>& killedTiles, WfRunInfo& info) {
   const int tilesW = (cam.W + tile - 1) / tile, tilesH = (cam.H + tile - 1) / tile;
-  size_t outCap = std::max<size_t>(size_t(1) << 16, size_t(cam.W) * size_t(cam.H) / 4);
+  // (Dense meshes reach ~1.5 visible polygons per pixel; a full buffer means
+  // tracing again with a larger one.)
+  size_t outCap = std::max<size_t>(size_t(1) << 16, size_t(cam.W) * size_t(cam.H) * 2);
   for (;;) {
     Params p;
     prepare(I, cfg, tilesW * tilesH, statWarpsFor<kAppPrimary>(), p);
@@ -860,7 +866,7 @@ void wfPrimary(GpuRenderer::Impl& I, const WfConfig& cfg, const Camera& cam, boo
 void wfPointShadows(GpuRenderer::Impl& I, const WfConfig& cfg, const Camera& cam, const Vec3& light,
                     const OutBeam* dPrim, int nPrim, std::vector<OutBeam>& shadowPolys, std::vector<int>& killed,
                     WfRunInfo& info) {
-  size_t outCap = std::max<size_t>(size_t(1) << 16, size_t(nPrim) * 2);
+  size_t outCap = std::max<size_t>(size_t(1) << 16, size_t(nPrim) * 4);
   for (;;) {
     Params p;
     prepare(I, cfg, nPrim, statWarpsFor<kAppPoint>(), p);

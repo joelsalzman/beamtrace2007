@@ -15,7 +15,7 @@ This repository implements the paper's beam tracer:
 
 It also includes the paper's comparison baseline, a one-ray-at-a-time kd-tree ray tracer, and a benchmark harness that reproduces the paper's tables and figures (Figs. 5–13).
 
-The CPU version follows the paper's design. It uses C++17 and keeps the four corner rays of a beam in one SIMD register: SSE `__m128` for float, AVX2 `__m256d` for double. The CUDA port in [`cuda/`](cuda/) runs the same algorithm code on the GPU (see [CUDA port](#cuda-port)).
+The CPU version follows the paper's design. It uses C++17 and keeps the four corner rays of a beam in one SIMD register: SSE `__m128` for float, AVX2 `__m256d` for double. The CUDA port in [`cuda/`](cuda/) runs the same algorithm code on the GPU, reorganized as a wavefront of sub-beams in queues (see [CUDA port](#cuda-port)).
 
 ## Quick start
 
@@ -51,8 +51,9 @@ Useful options:
 - `--exact` integrates the visible light polygons exactly with Lambert's formula, instead of the paper's eq. 2 light-center approximation.
 - `--light-scale S` scales the area light (used for Fig. 13).
 - `--no-mailbox` turns off the Post Office mailboxing.
+- `--trail` uses the stackless restart-trail continuation instead of the frame stack (identical output; see below).
 - `bt_render_d` is the double-precision build.
-- `cuda/bt_render_cuda` takes the same options and runs on the GPU (`--device cpu` switches back).
+- `cuda/bt_render_cuda` takes the same options and runs on the GPU (`--device cpu` switches back). `--warmup` renders the first view once untimed, so GPU allocations are not timed.
 
 ## Running the benchmarks
 
@@ -104,6 +105,8 @@ For primary visibility, a beam that already hits T1 and meets T2 is also split b
 
 Hit beams keep traversing until the next cell lies wholly beyond the hit (Fig. 4d). Sub-beams continue from the leaf where they were created; this is the paper's `KDStack`/`MissStack` scheme, implemented as a persistent stack of pending far nodes.
 
+The same continuation can also be kept without a stack (`--trail`): one bit per kd depth marks a pending far child, and parent links stored with the tree lead back to it (a restart trail, after Laine's for BVHs, HPG 2010). It visits the same cells in the same order, so output and statistics are bitwise identical; on the CPU it is 1–3% slower, but it lets a sub-beam carry its whole continuation in 12 bytes, which the GPU port needs.
+
 **Post Office mailboxing (Sec. 3.4).** Each leaf visit creates a mailbox id whose parent is the beam's id. Triangles are skipped if they were stamped by the beam or one of its 3 nearest ancestors.
 
 **Applications.**
@@ -125,33 +128,68 @@ Hit beams keep traversing until the next cell lies wholly beyond the hit (Fig. 4
 
 ## CUDA port
 
-[`cuda/gpu_render.cu`](cuda/gpu_render.cu) runs the CPU tracer's algorithm on the GPU. `BeamCore` (in [`src/beam/beam_core.h`](src/beam/beam_core.h)) is a host/device template over a storage policy:
-- On the CPU, the storage is growable `std::vector`s.
-- On the GPU, each thread has fixed-size arrays in local memory. Their sizes come from measured high-water marks.
+The GPU port reorganizes the tracer as a **wavefront of sub-beams** ([`cuda/wavefront.cu`](cuda/wavefront.cu)), following Laine, Karras & Aila, "Megakernels Considered Harmful: Wavefront Path Tracing on GPUs" (HPG 2013), with the persistent threads of Aila & Laine, "Understanding the Efficiency of Ray Traversal on GPUs" (HPG 2009). The paper's own algorithm is single-threaded and leaves this part open.
 
-If a thread runs out of storage, it flags its work item. The host then recomputes that item with the CPU tracer, so the output stays exact. A full 512² frame typically has 0–20 such pixels.
+**Sub-beams as records.** Every sub-beam is a self-contained 64-byte record: its corners, its hit status, the root it belongs to, and a restart-trail continuation (kd node, depth, pending far children, index of the next triangle in the leaf). Any thread can pick up any record from a queue. The per-record steps live in [`src/beam/wavefront_core.h`](src/beam/wavefront_core.h) and are shared by the GPU and by a host reference engine ([`src/beam/wavefront.cpp`](src/beam/wavefront.cpp)).
 
-Three kernels:
-- **Soft shadows:** one thread per pixel, after a GPU primary-ray kernel. The kernel uses persistent warps: each warp fetches 8×4 pixel tiles so its lanes trace similar beams.
-- **Primary visibility:** one thread per 16×16 pixel tile (each tile is a root beam).
-- **Point-light shadows:** one thread per primary hit beam.
+**Rounds.** Each round runs four kernels. Every kernel is a persistent grid: warps take queue entries with one `atomicAdd` for the whole warp, and appends are warp-aggregated so siblings stay next to each other.
 
-Two GPU-specific settings:
-- **No mailboxing.** With small per-thread tables in local memory, the Post Office costs more than it saves.
-- **Recompute triangle setup** instead of caching it.
+| kernel | one thread = | one warp = | what it does |
+|---|---|---|---|
+| schedule | — (1 thread) | — | resets counters; admits new roots while their budgets fit |
+| admit | one root: a pixel (soft shadows), a 16×16 tile (primary), a primary hit beam (point shadows) | 32 roots; for soft shadows an 8×4 pixel tile | sets up the root beam, pre-splits it by direction sign, queues the pieces |
+| trace | one queued sub-beam | 32 sub-beams from the queue | one leaf per iteration (climb / descend to it, test its triangles), until the sub-beam is finished or a triangle needs a real clip; lanes are refilled from the queue as soon as their sub-beam leaves the loop |
+| split | one sub-beam that needs a clip | 32 such sub-beams | clips it; reserves its pieces' slots with one atomic per warp and writes them into the next round's trace queue |
 
-**Validation.** `bt_tests_cuda` compares GPU and CPU output:
-- Soft-shadow visibility agrees to about 1e-6 on average; the maximum difference is 6e-3, at a few pixels where float rounding differs.
-- Primary visibility and point-shadow masks agree at every interior pixel.
+Cheap tests and expensive clips are separate kernels because only 7–13% of triangle tests clip: done inline, nearly every warp would stall on some lane's clip. A warp never shares one beam across a leaf's triangles, because leaves average only 2–4 tests per visit.
 
-**Performance, honestly.** On an RTX 2060 SUPER, soft shadows run 2–4× faster than one CPU core (Ryzen 5800X3D), but slower than all 16 CPU threads. Primary visibility per tile is slower than the CPU.
+**Bounded memory without waiting.** A root is admitted only if its budget of live sub-beams (128 for shadows, 4096 for primary tiles) fits in the queues. A root that would exceed it, or overflow a fixed per-thread list, is abandoned and recomputed on the CPU, so the output is always exact; at the default sizes no root in the benchmark scenes is abandoned. Soft-shadow visibility accumulates in 64-bit fixed point, so results do not depend on scheduling: two runs are bitwise identical.
 
-The algorithm keeps deep, irregular per-beam state: a beam pool, a work stack, a frame stack and polygon scratch space, about 12 KB per thread. Lanes in a warp follow different paths through the kd-tree and the splitting code. As a result:
-- Local-memory traffic dominates.
-- Divergence serializes the warp.
-- Adding warps per SM does not help.
+**Other GPU choices.**
+- No mailboxing (re-tests are idempotent).
+- Leaves reference packed 64-byte triangles (one wide load per test).
+- Fast division and square root (`--use_fast_math`). Two triangles sharing an edge still compute it from identical inputs, so beams stay crack-free.
 
-A fast GPU version would need a warp-cooperative redesign. For example, a warp could test a leaf's triangles in parallel against a shared beam, or process a pixel's beam pieces as a batch. That is future work. The paper itself is a CPU algorithm and used the GPU only for rasterization.
+**Validation.**
+- The host reference engine runs the same steps in the same rounds. Its output pieces are bitwise identical to the depth-first tracer's, and so are all its counters, for primary visibility, point shadows and soft shadows, in float and double (`tests/test_wavefront.cpp`).
+- `bt_tests_cuda` checks the GPU against the CPU:
+  - Soft-shadow visibility matches to about 1e-6 on average; the maximum is 6e-3, where float rounding differs.
+  - Primary visibility and point-shadow masks match at every interior pixel.
+  - Two runs are identical.
+  - Tiny budgets force thousands of pixels onto the CPU fallback, and the result stays exact.
+
+**Performance** (RTX 2060 SUPER vs Ryzen 7 5800X3D, view 0; `results/REPORT.md` has the full tables):
+
+Soft shadows, 512², including the GPU primary rays:
+
+| scene | wavefront GPU | first GPU port | CPU, 16 threads | CPU, 1 thread |
+|---|---|---|---|---|
+| plant | 0.29 s | 1.82 s | 0.50 s | 4.8 s |
+| conference | 0.19 s | 0.90 s | 0.23 s | 2.2 s |
+| sponza | 0.041 s | 0.166 s | 0.069 s | 0.61 s |
+| building | 0.016 s | 0.040 s | 0.080 s | 0.32 s |
+
+Primary visibility, 1024² (the paper's CPU numbers are single-threaded):
+
+| scene | wavefront GPU | first GPU port | CPU, 1 thread |
+|---|---|---|---|
+| armadillo | 163 ms | 1102 ms | 1238 ms |
+| sponza | 36 ms | 243 ms | 168 ms |
+| conference | 49 ms | 286 ms | 102 ms |
+| plant | 13 ms | 47 ms | 19 ms |
+| building | 12 ms | 61 ms | 2.3 ms |
+| room | 6 ms | 12 ms | 1.2 ms |
+
+What these numbers show:
+- **Against the first port:** the wavefront engine is 2–7× faster.
+- **Against the CPU:** it beats all 16 CPU threads on soft shadows (1.2–5×) and one thread on primary visibility for the larger scenes.
+- **Small scenes:** on the smallest ones it is slower than one CPU core. Each round costs a few kernel launches, and a 1024² frame is 4,096 tile roots, so a frame has a floor of a few milliseconds.
+- **What limits it:** the trace kernel is limited by memory latency. Its per-lane state allows only 16 warps per SM, and even with lane refill only part of each warp is active in the descent and triangle-test loops. Tracing and clipping take roughly equal time. On Conference, 29% of the clips turn out to change nothing.
+
+The first port, which ran one thread per root beam with ~12 KB of local memory each, is still available with `BT_GPU_ENGINE=v1`. Diagnostics:
+- `BT_GPU_DEBUG=1` prints rounds, queue sizes and abandoned roots.
+- `BT_WF_PROFILE=1` prints per-kernel times.
+- `BT_WF_BUDGET` and `BT_WF_CAPACITY` override the budget and queue size.
 
 ## Correctness tests
 
@@ -162,21 +200,25 @@ A fast GPU version would need a warp-cooperative redesign. For example, a warp c
 - **Beam output.** Re-testing every final beam against every triangle changes nothing (idempotency). Results with and without mailboxing are identical, and the kd-tree agrees with a brute-force single leaf.
 - **Soft shadows** match the closed form for a square occluder under a square light to about 1e-7 in double, and match 9,216-sample ray tracing on the plant. The exact Lambert integration matches quadrature.
 - **Point-light shadows** match shadow rays.
+- **Continuations and wavefront.** The restart trail reproduces the frame stack bitwise, and so does the wavefront reference engine, root by root (pieces and counters). Roots that exceed their sub-beam budget are reported, never silently wrong.
+
+`bt_golden_f` / `bt_golden_d CONFIG...` print hashes of the CPU tracer's exact output and counters, for checking that a refactoring changes nothing. Host code is compiled without implicit FMA contraction (`-ffp-contract=off`), so these hashes do not depend on how the compiler inlines.
 
 ## Repository layout
 
 ```
 src/core     Real/Vec3 and the 4-lane R4 SIMD type
-src/beam     the beam algorithm (beam_core.h, host+device), CPU tracer (beam_tracer.*), 2D polygon geometry (beam_geom.h)
+src/beam     the beam algorithm (beam_core.h, host+device), CPU tracer (beam_tracer.*), 2D polygon geometry (beam_geom.h),
+             wavefront steps (wavefront_core.h, host+device) and the host reference engine (wavefront.*)
 src/accel    SAH kd-tree
 src/ray      the baseline ray tracer (ray_core.h, host+device)
 src/render   camera, rasterizer, primary / point-shadow / soft-shadow pipelines
 src/scene    meshes, OBJ/PLY loaders, procedural scenes, config files
-apps         bt_render, bt_compare
+apps         bt_render, bt_compare, bt_golden
 tests        correctness tests
 scripts      fetch_scenes.sh, run_paper_benchmarks.sh, make_report.py
 configs      scene configs (camera paths, lights)
-cuda         GPU port (gpu_render.cu) and GPU-vs-CPU tests
+cuda         GPU port: wavefront engine (wavefront.cu), primary rays and first port (gpu_render.cu), GPU-vs-CPU tests
 ```
 
 ## License

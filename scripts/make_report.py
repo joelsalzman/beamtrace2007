@@ -265,31 +265,50 @@ if th:
 cu = read("cuda.csv")
 if cu:
     w("## CUDA port (extra)\n")
-    w("The same BeamCore runs one thread per pixel (soft shadows), per 16x16 tile (primary visibility) or per "
-      "primary hit beam (point shadows), with fixed per-thread storage; work that overflows it is redone on "
-      "the CPU (count in the log). GPU results match the CPU beams to float precision (`bt_tests_cuda`).\n")
-    soft = [r for r in cu if r["mode"] == "softshadow"]
+    w("Two GPU engines, both validated against the CPU beams (`bt_tests_cuda`); work they abandon is redone on "
+      "the CPU and included in the times:\n")
+    w("- **wavefront** (default): sub-beams are records in queues in GPU memory; each round, one kernel advances "
+      "every queued sub-beam (one thread each) until it finishes or needs a clip, and a second kernel clips "
+      "those (one thread each) and queues the pieces. Roots: a pixel (soft shadows), a 16x16 tile (primary), a "
+      "primary hit beam (point shadows).")
+    w("- **first port** (`BT_GPU_ENGINE=v1`): one thread runs a whole root beam depth-first, with fixed "
+      "per-thread storage.\n")
+
+    def gpu(rows, mode, sc, tag):
+        r = [x for x in rows if x["mode"] == mode and x["scene"] == sc and x["tag"] == tag]
+        return (num(r[0], "trace_s") + num(r[0], "primary_s")) if r else float("nan")
+
+    soft = [r for r in cu if r["mode"] == "softshadow" and r["tag"] == ""]
     if soft:
-        w("| scene | GPU soft shadows | CPU, 1 thread | CPU, all threads | GPU vs exact CPU (max abs error) |")
-        w("|---|---|---|---|---|")
+        w(f"Soft shadows, view 0 (times include the primary rays):\n")
+        w("| scene | wavefront GPU | first GPU port | CPU, 1 thread | CPU, all threads | wavefront vs all threads | "
+          "GPU vs CPU: pixels off by > 0.01 (max) |")
+        w("|---|---|---|---|---|---|---|")
         cpu1 = {r["scene"]: num(r, "trace_s") + num(r, "primary_s") for r in ss if r["method"] == "beam" and r["tag"] == ""}
         errg = {e["scene"]: e for e in errs if e["method"] == "beam_cuda"}
         for r in soft:
-            if r["tag"] == "cpu_all_threads":
-                continue
             sc = r["scene"]
-            allt = [x for x in soft if x["scene"] == sc and x["tag"] == "cpu_all_threads"]
+            g, v1 = gpu(cu, "softshadow", sc, ""), gpu(cu, "softshadow", sc, "v1")
+            allt = [x for x in cu if x["mode"] == "softshadow" and x["scene"] == sc and x["tag"] == "cpu_all_threads"]
+            ta = (num(allt[0], "trace_s") + num(allt[0], "primary_s")) if allt else float("nan")
             e = errg.get(sc)
-            w(f"| {sc} | {num(r, 'trace_s') + num(r, 'primary_s'):.3f} s | {cpu1.get(sc, float('nan')):.3f} s | "
-              f"{(num(allt[0], 'trace_s') + num(allt[0], 'primary_s')) if allt else float('nan'):.3f} s "
-              f"({allt[0]['threads'] if allt else '-'} threads) | {float(e['max']) if e else float('nan'):.2g} |")
+            diff = f"{100 * float(e['frac_gt_0.01']):.4f}% ({float(e['max']):.2g})" if e else "-"
+            w(f"| {sc} | {g:.3f} s | {v1:.3f} s | {cpu1.get(sc, float('nan')):.3f} s | {ta:.3f} s "
+              f"({allt[0]['threads'] if allt else '-'}) | {ta / g:.1f}x | {diff} |")
         w("")
-    pt = [r for r in cu if r["mode"] == "pointshadow"]
-    if pt:
-        w("| scene | GPU primary + point shadows (incl. transfers) |")
-        w("|---|---|")
-        for r in pt:
-            w(f"| {r['scene']} | {num(r, 'trace_s') * 1000:.1f} ms |")
+        w("Isolated differences come from the GPU's float primary rays hitting a different triangle than the CPU's "
+          "at a few silhouette pixels (the shading point differs); both GPU engines show the same ones.\n")
+    for mode, title in (("primary", "Primary visibility"), ("pointshadow", "Primary visibility + point shadows")):
+        rows = [r for r in cu if r["mode"] == mode and r["tag"] == ""]
+        if not rows:
+            continue
+        w(f"{title}, view 0, {rows[0]['W']}x{rows[0]['H']} (CPU: one thread, as in the paper):\n")
+        w("| scene | wavefront GPU | first GPU port | CPU, 1 thread | wavefront vs CPU |")
+        w("|---|---|---|---|---|")
+        for r in rows:
+            sc = r["scene"]
+            g, v1, c = gpu(cu, mode, sc, ""), gpu(cu, mode, sc, "v1"), gpu(cu, mode, sc, "cpu")
+            w(f"| {sc} | {g * 1000:.1f} ms | {v1 * 1000:.1f} ms | {c * 1000:.1f} ms | {c / g:.1f}x |")
         w("")
 
 # ------------------------------------------------------------------ plots
