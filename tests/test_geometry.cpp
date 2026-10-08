@@ -255,3 +255,29 @@ TEST(lambert_formula_matches_quadrature) {
   }
   CHECK_MSG(std::fabs(double(G) - sum) < 2e-3 * sum, "G %g quad %g", double(G), sum);
 }
+
+TEST(kd_clipped_bounds_round_outward) {
+  // Regression (Sponza): a nearly planar triangle (z spans 4 float ulps). In a
+  // cell cut at y = 10.6436 its true minimum z is 2.5214872034, which rounds
+  // *up* to the float 2.5214872360 -- exactly the next split plane -- so the
+  // triangle was sent only to the upper child and rays below missed it.
+  // Clipped bounds must be rounded outward.
+  Scene s;
+  uint16_t m = s.addMaterial(Vec3(1, 1, 1));
+  uint32_t a = s.addVertex(Vec3(Real(1.03724), Real(9.72247), Real(2.52148795))),
+           b = s.addVertex(Vec3(Real(0.00724), Real(10.8933), Real(2.521487))),
+           c = s.addVertex(Vec3(Real(10.9272), Real(10.8933), Real(2.521487)));
+  s.addTri(a, b, c, m);
+  s.finalize();
+  AABB full;
+  for (int k = 0; k < 3; ++k) full.expand(s.v(0, k));
+  AABB box;
+  box.lo = Vec3(Real(0.22687757), Real(10.1392536), Real(2.521487));
+  box.hi = Vec3(Real(0.670590699), Real(10.6436396), Real(2.52148771));
+  AABB r = clippedTriangleBounds(s, 0, box, full);
+  // exact minimum height inside the box, in double
+  double za = double(s.v(0, 0).z), zb = double(s.v(0, 1).z), ya = double(s.v(0, 0).y), yb = double(s.v(0, 1).y);
+  double zmin = zb + (za - zb) * (yb - double(box.hi.y)) / (yb - ya);
+  CHECK_MSG(double(r.lo.z) <= zmin, "clipped lo.z %.10g above the true minimum %.10g", double(r.lo.z), zmin);
+  CHECK(r.lo.z < Real(2.52148724));
+}

@@ -417,3 +417,50 @@ TEST(point_shadows_match_shadow_rays) {
   CHECK(compared > 15000);
   CHECK_MSG(bad == 0, "%d of %d samples disagree", bad, compared);
 }
+
+TEST(kd_ray_traversal_matches_brute_force) {
+  // Regression (Sponza): overlapping, nearly planar floor triangles whose
+  // vertex heights differ by a few ulps. SAH then splits inside their tiny
+  // z-extent, and clipping a near-planar triangle against such a z-plane is
+  // ill-conditioned; every kd cell a triangle crosses must still list it.
+  Scene s;
+  uint16_t m = s.addMaterial(Vec3(1, 1, 1));
+  Rng rng(31);
+  const Real base = Real(2.521487);
+  auto zjit = [&]() {
+    Real z = base;
+    int k = int(rng.next() % 5);
+    for (int i = 0; i < k; ++i) z = std::nextafter(z, Real(10));
+    return z;
+  };
+  for (int i = 0; i < 1500; ++i) {
+    Real x = Real(rng.uniform(-3, 3)), y = Real(rng.uniform(-3, 3)), sz = Real(rng.uniform(0.05, 2.0));
+    uint32_t a = s.addVertex(Vec3(x, y, zjit())), b = s.addVertex(Vec3(x + sz, y + Real(rng.uniform(-0.3, 0.3)) * sz, zjit())),
+             c = s.addVertex(Vec3(x + Real(rng.uniform(-0.3, 0.3)) * sz, y + sz, zjit()));
+    s.addTri(a, b, c, m);
+  }
+  s.finalize();
+  KdTree tree;
+  tree.build(s);
+  RayTracer rt(s, tree);
+  TraceStats st;
+  int bad = 0, hits = 0;
+  for (int i = 0; i < 15000; ++i) {
+    Ray r;
+    r.o = Vec3(Real(rng.uniform(-6, 6)), Real(rng.uniform(-6, 6)), Real(rng.uniform(3, 6)));
+    Vec3 target(Real(rng.uniform(-3, 3)), Real(rng.uniform(-3, 3)), base);
+    r.d = target - r.o;
+    RayHit h;
+    rt.intersect(r, h, st);
+    Real best = kInf;
+    for (int t = 0; t < s.numTris(); ++t) {
+      Real th = rt.hitTri(r, t, false);
+      if (th > 0 && th < best) best = th;
+    }
+    hits += std::isfinite(best);
+    bool ok = std::isfinite(best) ? (h.tri >= 0 && std::fabs(h.t - best) <= Real(1e-5) * best) : h.tri < 0;
+    if (!ok && bad++ < 3) fprintf(stderr, "    ray %d: kd t=%g brute t=%g\n", i, double(h.t), double(best));
+  }
+  CHECK(hits > 8000);
+  CHECK_MSG(bad == 0, "%d rays missed their nearest triangle", bad);
+}

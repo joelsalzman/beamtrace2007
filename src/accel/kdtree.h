@@ -46,4 +46,8 @@ class KdTree {
   size_t numRefs = 0;
 };
 
+// Bounds of triangle `tri` clipped to `box`, rounded outward, never larger
+// than `box` or `fallback` (the unclipped bounds). Exposed for tests.
+AABB clippedTriangleBounds(const Scene& scene, uint32_t tri, const AABB& box, const AABB& fallback);
+
 }  // namespace bt

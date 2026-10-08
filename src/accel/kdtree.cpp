@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "util/misc.h"
 
@@ -14,8 +15,10 @@ struct Ref {
   AABB b;
 };
 
+}  // namespace
+
 // Bounds of triangle `t` clipped to `box` (computed in double).
-AABB clippedBounds(const Scene& s, uint32_t t, const AABB& box, const AABB& fallback) {
+AABB clippedTriangleBounds(const Scene& s, uint32_t t, const AABB& box, const AABB& fallback) {
   double poly[2][12][3];
   int n = 3;
   for (int k = 0; k < 3; ++k) {
@@ -50,15 +53,30 @@ AABB clippedBounds(const Scene& s, uint32_t t, const AABB& box, const AABB& fall
     }
   }
   if (n == 0) return fallback;
+  // Bounds in double, then rounded outward: a bound that rounds inward could
+  // drop the triangle from a thin cell it actually crosses.
+  double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+  for (int i = 0; i < n; ++i)
+    for (int c = 0; c < 3; ++c) {
+      lo[c] = std::min(lo[c], poly[cur][i][c]);
+      hi[c] = std::max(hi[c], poly[cur][i][c]);
+    }
   AABB r;
-  for (int i = 0; i < n; ++i) r.expand(Vec3(Real(poly[cur][i][0]), Real(poly[cur][i][1]), Real(poly[cur][i][2])));
-  // Never grow beyond the box or the original bounds (guards against rounding).
+  const double ulp = double(std::numeric_limits<Real>::epsilon());
+  for (int c = 0; c < 3; ++c) {
+    double pad = 4 * ulp * (std::fabs(lo[c]) + std::fabs(hi[c]) + double(box.hi[c] - box.lo[c]));
+    r.lo[c] = Real(lo[c] - pad);
+    r.hi[c] = Real(hi[c] + pad);
+  }
+  // Never grow beyond the box or the original bounds.
   r.lo = vmax(r.lo, vmax(box.lo, fallback.lo));
   r.hi = vmin(r.hi, vmin(box.hi, fallback.hi));
   for (int a = 0; a < 3; ++a)
     if (r.lo[a] > r.hi[a]) r.lo[a] = r.hi[a];
   return r;
 }
+
+namespace {
 
 class Builder {
  public:
@@ -94,8 +112,8 @@ class Builder {
       bool goRight = planar || hi > bestSplit;
       if (!goLeft && !goRight) goLeft = goRight = true;  // cannot happen, but be safe
       if (goLeft && goRight && !planar && p_.clipBounds) {
-        left.push_back({r.tri, clippedBounds(scene_, r.tri, lbox, r.b)});
-        right.push_back({r.tri, clippedBounds(scene_, r.tri, rbox, r.b)});
+        left.push_back({r.tri, clippedTriangleBounds(scene_, r.tri, lbox, r.b)});
+        right.push_back({r.tri, clippedTriangleBounds(scene_, r.tri, rbox, r.b)});
       } else {
         if (goLeft) left.push_back(r);
         if (goRight) right.push_back(r);
