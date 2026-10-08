@@ -28,7 +28,9 @@ struct Args {
   int threads = 1;
   bool exact = false, jitter = true, mailbox = true, wire = false, singleLeaf = false, quiet = false;
   bool writePfm = false;
+  bool info = false;
   double lightScale = 1;
+  double kdCi = -1, kdCt = -1;
   int cull = -1;  // -1: from config
 };
 
@@ -37,7 +39,7 @@ void usage() {
           "usage: bt_render --config FILE [--view N | --views all] [--mode primary|pointshadow|softshadow]\n"
           "                 [--method beam|ray] [--res WxH] [--aa N] [--ray-aa N] [--samples N] [--threads N]\n"
           "                 [--exact] [--no-jitter] [--no-mailbox] [--light-scale S] [--cull 0|1]\n"
-          "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet]\n");
+          "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet] [--info]\n");
 }
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -73,7 +75,10 @@ bool parseArgs(int argc, char** argv, Args& a) {
     else if (s == "--csv") a.csv = next();
     else if (s == "--tag") a.tag = next();
     else if (s == "--kd-single-leaf") a.singleLeaf = true;
+    else if (s == "--kd-ci") a.kdCi = std::atof(next().c_str());
+    else if (s == "--kd-ct") a.kdCt = std::atof(next().c_str());
     else if (s == "--quiet") a.quiet = true;
+    else if (s == "--info") a.info = true;
     else if (s == "--help" || s == "-h") return false;
     else {
       fprintf(stderr, "unknown option %s\n", s.c_str());
@@ -93,16 +98,17 @@ void appendCsv(const Args& a, const SceneConfig& cfg, const Scene& scene, const 
     fprintf(f,
             "scene,mode,method,precision,view,W,H,aa,samples,threads,tris,visible_tris,hit_beams,beams,kd_steps,"
             "leaf_visits,tri_tests,hits,splits,presplit,mailbox_skips,rays,dropped_area,trace_s,primary_s,"
-            "raster_s,build_s,light_scale,exact,mailbox,mean_vis,tag\n");
+            "raster_s,build_s,light_scale,exact,mailbox,mean_vis,five_splits,shadow_vis_tris,tag\n");
   const TraceStats& t = rs.trace;
-  fprintf(f, "%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.6g,%.6f,%.6f,%.6f,%.4f,%g,%d,%d,%.6f,%s\n",
+  fprintf(f, "%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.6g,%.6f,%.6f,%.6f,%.4f,%g,%d,%d,%.6f,%llu,%llu,%s\n",
           cfg.name.c_str(), a.mode.c_str(), a.method.c_str(), sizeof(Real) == 8 ? "double" : "float", view, a.W,
           a.H, a.method == "beam" ? a.aa : a.rayAA, a.samples, a.threads, scene.numTris(), rs.visibleTris,
           rs.hitBeams, (unsigned long long)t.beams, (unsigned long long)t.kdSteps,
           (unsigned long long)t.leafVisits, (unsigned long long)t.triTests, (unsigned long long)t.hits,
           (unsigned long long)t.splits, (unsigned long long)t.presplitBeams, (unsigned long long)t.mailboxSkips,
           (unsigned long long)t.rays, t.droppedArea, rs.traceSeconds, rs.primarySeconds, rs.rasterSeconds,
-          tree.buildSeconds, a.lightScale, a.exact ? 1 : 0, a.mailbox ? 1 : 0, meanVis, a.tag.c_str());
+          tree.buildSeconds, a.lightScale, a.exact ? 1 : 0, a.mailbox ? 1 : 0, meanVis,
+          (unsigned long long)t.fiveSplits, (unsigned long long)t.visibleTris, a.tag.c_str());
   fclose(f);
 }
 
@@ -136,9 +142,21 @@ int main(int argc, char** argv) {
     return 1;
   }
   double loadS = tload.seconds();
+  if (a.info) {
+    const AABB& b = scene.bounds;
+    printf("%s: %d tris, %zu vertices, bounds (%g %g %g) - (%g %g %g)\n", cfg.name.c_str(), scene.numTris(),
+           scene.pos.size(), double(b.lo.x), double(b.lo.y), double(b.lo.z), double(b.hi.x), double(b.hi.y),
+           double(b.hi.z));
+    return 0;
+  }
   KdTree tree;
   KdBuildParams kp;
   kp.singleLeaf = a.singleLeaf;
+  // Beams prefer larger leaves than rays (each beam kd step is relatively more
+  // expensive than a ray's); each method gets its own SAH cost by default.
+  kp.costIntersect = a.method == "beam" ? Real(0.4) : Real(1.5);
+  if (a.kdCi > 0) kp.costIntersect = Real(a.kdCi);
+  if (a.kdCt > 0) kp.costTraverse = Real(a.kdCt);
   tree.build(scene, kp);
   bool cull = a.cull >= 0 ? a.cull != 0 : cfg.cullBackfaces;
   if (!a.quiet)
@@ -252,11 +270,11 @@ int main(int argc, char** argv) {
     double px = double(a.W) * a.H;
     if (!a.quiet)
       printf("%s view %d %s/%s: trace %.4fs%s | visible tris %d, hit beams %d, beams %llu | kd steps/px %.4g, "
-             "isect/px %.4g, hits/px %.4g%s\n",
+             "isect/px %.4g, hits/px %.4g, vis tris/px %.4g%s\n",
              cfg.name.c_str(), view, a.mode.c_str(), a.method.c_str(), rs.traceSeconds,
              a.mode == "softshadow" ? (" (+primary " + std::to_string(rs.primarySeconds) + "s)").c_str() : "",
              rs.visibleTris, rs.hitBeams, (unsigned long long)t.beams, double(t.kdSteps) / px,
-             double(t.triTests) / px, double(t.hits) / px,
+             double(t.triTests) / px, double(t.hits) / px, double(t.visibleTris) / px,
              a.mode == "softshadow" ? (", mean V " + std::to_string(meanVis)).c_str() : "");
     appendCsv(a, cfg, scene, tree, view, rs, meanVis);
   }

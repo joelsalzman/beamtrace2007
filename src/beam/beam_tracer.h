@@ -84,6 +84,7 @@ class BeamTracer {
   TraceStats stats;
   bool useMailbox = true;
   bool keepOutput = true;  // if false only areas are accumulated (soft shadows)
+  bool orderEdges = true;  // clip by the most-cutting triangle edge first
 
   // ---- internals exposed for unit tests ----
   struct alignas(32) Beam {
@@ -158,6 +159,8 @@ class BeamTracer {
   uint32_t stamp_ = 0;
   std::vector<TriInfo> cache_;
   std::vector<uint64_t> mail_;
+  std::vector<uint32_t> visStamp_;  // distinct-hit counting per trace
+  uint32_t traceId_ = 0;
   std::vector<uint64_t> evParent_;
   uint64_t evBase_ = 1, nextEvent_ = 1;
   std::vector<Beam> pool_;

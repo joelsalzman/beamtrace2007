@@ -7,6 +7,7 @@
 //   analytic    floor + square occluder + (config) square light: closed-form soft shadows
 //   random_tris `n=` random, interpenetrating triangles in the unit cube (tests)
 //   sphere      one tessellated sphere (crack tests)
+//   floorquad   a square floor at height `y=` with side `size=`
 #include <cmath>
 
 #include "scene/scene.h"
@@ -98,12 +99,12 @@ void buildPlant(Scene& s, uint64_t seed) {
   uint16_t potM = s.addMaterial(Vec3(0.7f, 0.4f, 0.25f));
   uint16_t stemM = s.addMaterial(Vec3(0.35f, 0.5f, 0.2f));
   uint16_t leafM = s.addMaterial(Vec3(0.3f, 0.65f, 0.25f));
-  addQuad(s, Vec3(-3, 0, -3), Vec3(-3, 0, 3), Vec3(3, 0, 3), Vec3(3, 0, -3), floorM);
-  addQuad(s, Vec3(-3, 0, -1.5f), Vec3(3, 0, -1.5f), Vec3(3, 3, -1.5f), Vec3(-3, 3, -1.5f), floorM);
+  addQuad(s, Vec3(-4, 0, -4), Vec3(-4, 0, 4), Vec3(4, 0, 4), Vec3(4, 0, -4), floorM);
+  addQuad(s, Vec3(-4, 0, -1.5f), Vec3(4, 0, -1.5f), Vec3(4, 4, -1.5f), Vec3(-4, 4, -1.5f), floorM);
   addCylinder(s, Vec3(0, 0, 0), Real(0.3), Real(0.45), 24, potM);
   Rng rng(seed);
-  const int branches = 9;
-  const int leavesPerBranch = 250;  // 9 * 250 * 2 = 4500 leaf triangles (+ stems, pot, floor ~ 5.2K)
+  const int branches = 7;
+  const int leavesPerBranch = 180;  // 7 * 180 leaves * 4 triangles = 5040 (+ pot, stems, floor ~ 5.4K)
   for (int b = 0; b < branches; ++b) {
     double az = 2 * M_PI * (b + rng.uniform() * 0.5) / branches;
     double el = 0.9 + 0.5 * rng.uniform();
@@ -111,22 +112,27 @@ void buildPlant(Scene& s, uint64_t seed) {
     Vec3 start(0, Real(0.4), 0);
     Real len = Real(0.9 + 0.5 * rng.uniform());
     Vec3 endp = start + dir * len;
-    for (int k = 0; k < 6; ++k) {  // stem as a chain of small cubes
-      Vec3 c = start + (endp - start) * (Real(k) / 5);
+    for (int k = 0; k < 4; ++k) {  // stem as a chain of small cubes
+      Vec3 c = start + (endp - start) * (Real(k) / 3);
       addBox(s, c - Vec3(0.015f, 0.015f, 0.015f), c + Vec3(0.015f, 0.015f, 0.015f), stemM);
     }
     for (int l = 0; l < leavesPerBranch; ++l) {
-      Real t = Real(0.2 + 0.8 * rng.uniform());
+      Real t = Real(0.25 + 0.75 * rng.uniform());
       Vec3 c = start + dir * (t * len) +
-               Vec3(Real(rng.uniform(-0.25, 0.25)), Real(rng.uniform(-0.15, 0.25)), Real(rng.uniform(-0.25, 0.25)));
+               Vec3(Real(rng.uniform(-0.3, 0.3)), Real(rng.uniform(-0.2, 0.3)), Real(rng.uniform(-0.3, 0.3)));
       Vec3 a = normalize(Vec3(Real(rng.uniform(-1, 1)), Real(rng.uniform(-0.3, 1)), Real(rng.uniform(-1, 1))));
       Vec3 n = anyOrthogonal(a);
       Vec3 bvec = normalize(cross(a, n) + n * Real(rng.uniform(-0.5, 0.5)));
-      Real L = Real(0.06 + 0.05 * rng.uniform()), W = L * Real(0.35);
+      Vec3 nn = normalize(cross(a, bvec));
+      Real L = Real(0.07 + 0.06 * rng.uniform()), W = L * Real(0.45);
+      // a slightly folded diamond: 4 triangles around a raised midrib point
+      uint32_t ic = s.addVertex(c + nn * (L * Real(0.15)));
       uint32_t i0 = s.addVertex(c - a * L), i1 = s.addVertex(c + bvec * W), i2 = s.addVertex(c + a * L),
                i3 = s.addVertex(c - bvec * W);
-      s.addTri(i0, i1, i2, leafM);
-      s.addTri(i0, i2, i3, leafM);
+      s.addTri(ic, i0, i1, leafM);
+      s.addTri(ic, i1, i2, leafM);
+      s.addTri(ic, i2, i3, leafM);
+      s.addTri(ic, i3, i0, leafM);
     }
   }
 }
@@ -204,6 +210,10 @@ bool buildProcedural(const std::string& name, const std::map<std::string, std::s
                                       Real(rng.uniform(-size, size))));
       s.addTri(idx[0], idx[1], idx[2], m);
     }
+  } else if (name == "floorquad") {
+    Real y = Real(param(p, "y", 0)), F = Real(param(p, "size", 10)) / 2;
+    uint16_t m = s.addMaterial(Vec3(0.75f, 0.75f, 0.72f));
+    addQuad(s, Vec3(-F, y, -F), Vec3(-F, y, F), Vec3(F, y, F), Vec3(F, y, -F), m);
   } else if (name == "sphere") {
     uint16_t m = s.addMaterial(Vec3(0.7f, 0.7f, 0.7f));
     int st = int(param(p, "stacks", 24));

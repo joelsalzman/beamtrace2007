@@ -15,6 +15,8 @@ struct TraceStats {
   uint64_t rootBeams = 0;     // beams handed to the tracer
   uint64_t presplitBeams = 0; // extra beams created by the direction-sign pre-split
   uint64_t mailboxSkips = 0;  // triangles skipped by the Post Office
+  uint64_t fiveSplits = 0;    // pentagons split into quad + triangle (4-corner limit)
+  uint64_t visibleTris = 0;   // distinct triangles hit, summed over beam trees
   uint64_t rays = 0;          // rays traced
   double droppedArea = 0;     // cross-section area lost to degenerate slivers (plane units)
 
@@ -28,6 +30,8 @@ struct TraceStats {
     rootBeams += o.rootBeams;
     presplitBeams += o.presplitBeams;
     mailboxSkips += o.mailboxSkips;
+    fiveSplits += o.fiveSplits;
+    visibleTris += o.visibleTris;
     rays += o.rays;
     droppedArea += o.droppedArea;
   }

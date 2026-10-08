@@ -54,7 +54,8 @@ BeamPlane BeamPlane::make(const Vec3& O, const Vec3& p0, const Vec3& u_, const V
 }
 
 BeamTracer::BeamTracer(const Scene& scene, const KdTree& tree)
-    : scene_(scene), tree_(tree), cache_(size_t(1) << kCacheBits), mail_(size_t(scene.numTris()), 0) {}
+    : scene_(scene), tree_(tree), cache_(size_t(1) << kCacheBits), mail_(size_t(scene.numTris()), 0),
+      visStamp_(size_t(scene.numTris()), 0) {}
 
 void BeamTracer::setupQuery(const BeamQuery& q, Real ext) {
   q_ = q;
@@ -319,6 +320,10 @@ void BeamTracer::output(const Beam& b, int tri) {
   if (tri >= 0) {
     out_->hitArea += double(area);
     stats.hits++;
+    if (visStamp_[size_t(tri)] != traceId_) {
+      visStamp_[size_t(tri)] = traceId_;
+      stats.visibleTris++;
+    }
   } else {
     out_->missArea += double(area);
   }
@@ -346,6 +351,7 @@ void BeamTracer::emit(const Poly2& p0, const Beam& parent, int newHit, bool hitN
   int np = 1;
   if (p0.n == 5) {
     splitFive(p0, pieces[0], pieces[1]);
+    stats.fiveSplits++;
     np = 2;
   } else {
     pieces[0] = p0;
@@ -430,6 +436,22 @@ void BeamTracer::intersect(int beamIdx, int t, const TriInfo& ti) {
   // the beam's old status; pieces inside every line take the new status. The
   // pieces are committed only if some piece really changes status, so a
   // triangle whose overlap with the beam is empty or hidden never fragments it.
+  // Clip first by the edge that leaves the smallest remainder: later cuts
+  // then act on smaller pieces, which shortens their extension lines across
+  // the miss region (less fragmentation of later beams).
+  if (orderEdges) {
+    Real score[3];
+    for (int k = 0; k < 3; ++k) {
+      R4 dv = B.qx * L[k].a + B.qy * L[k].b + L[k].c;
+      R4 pos = rmax(dv, R4(Real(0)));
+      score[k] = pos[0] + pos[1] + pos[2] + (B.n == 4 ? pos[3] : Real(0));
+    }
+    for (int i = 1; i < 3; ++i)
+      for (int j = i; j > 0 && score[j] < score[j - 1]; --j) {
+        std::swap(score[j], score[j - 1]);
+        std::swap(L[j], L[j - 1]);
+      }
+  }
   tmpKeep_.clear();
   tmpNew_.clear();
   Poly2 stack[8];
@@ -463,6 +485,7 @@ void BeamTracer::intersect(int beamIdx, int t, const TriInfo& ti) {
       if (in.n == 5) {
         Poly2 a, b;
         splitFive(in, a, b);
+        stats.fiveSplits++;
         stack[sp] = b;
         stackLine[sp] = li + 1;
         ++sp;
@@ -581,6 +604,10 @@ void BeamTracer::addRoot(const Poly2& p, int axis, int8_t sgn[3]) {
 void BeamTracer::trace(const BeamQuery& query, const Poly2* roots, int numRoots, BeamOutput& out) {
   out_ = &out;
   out.clear();
+  if (++traceId_ == 0) {
+    std::fill(visStamp_.begin(), visStamp_.end(), 0u);
+    traceId_ = 1;
+  }
   Real ext = 0;
   for (int i = 0; i < numRoots; ++i) ext = std::max(ext, roots[i].extent());
   setupQuery(query, ext);
@@ -640,6 +667,11 @@ void BeamTracer::trace(const BeamQuery& query, const Poly2* roots, int numRoots,
         node = co;
         box = bo;
       }
+    }
+    if (tree_.nodes[node].count() == 0) {  // empty leaf: just move on
+      stats.leafVisits++;
+      advance(w.beam, frame);
+      continue;
     }
     processLeaf(w.beam, tree_.nodes[node]);
     // processLeaf leaves the live pieces in cur_; advance() only touches work_.

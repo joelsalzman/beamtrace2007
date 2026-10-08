@@ -48,30 +48,40 @@ void SampleBuffer::init(int W_, int H_, int aa) {
 void rasterize(const std::vector<OutBeam>& polys, const Camera& cam, SampleBuffer& sb, bool shadowPass) {
   for (const OutBeam& ob : polys) {
     if (!shadowPass && ob.tri < 0) continue;
-    Real px[4], py[4];
-    Real lx = kInf, hx = -kInf, ly = kInf, hy = -kInf;
+    // Edge half-planes A x + B y + C >= 0 in pixel coordinates (polygons are
+    // counter-clockwise in q, and q -> pixel scales both axes positively).
+    double px[4], py[4], A[4], B[4], C[4];
+    double ly = 1e300, hy = -1e300;
     for (int i = 0; i < ob.n; ++i) {
-      cam.qToPixel(ob.x[i], ob.y[i], px[i], py[i]);
-      lx = std::min(lx, px[i]);
-      hx = std::max(hx, px[i]);
+      Real x, y;
+      cam.qToPixel(ob.x[i], ob.y[i], x, y);
+      px[i] = double(x);
+      py[i] = double(y);
       ly = std::min(ly, py[i]);
       hy = std::max(hy, py[i]);
     }
-    int x0 = std::max(0, int(std::floor(lx))), x1 = std::min(sb.W - 1, int(std::floor(hx)));
-    int y0 = std::max(0, int(std::floor(ly))), y1 = std::min(sb.H - 1, int(std::floor(hy)));
-    // Orientation: polygons are counter-clockwise (positive area) in q, and the
-    // q -> pixel map scales both axes positively.
-    for (int y = y0; y <= y1; ++y) {
-      for (int x = x0; x <= x1; ++x) {
-        for (int s = 0; s < sb.S; ++s) {
-          Real sx = Real(x) + sb.offs[size_t(s)].x, sy = Real(y) + sb.offs[size_t(s)].y;
-          bool inside = true;
-          for (int i = 0; i < ob.n && inside; ++i) {
-            int j = i + 1 == ob.n ? 0 : i + 1;
-            Real e = (px[j] - px[i]) * (sy - py[i]) - (py[j] - py[i]) * (sx - px[i]);
-            inside = e >= 0;
-          }
-          if (!inside) continue;
+    for (int i = 0; i < ob.n; ++i) {
+      int j = i + 1 == ob.n ? 0 : i + 1;
+      A[i] = -(py[j] - py[i]);
+      B[i] = px[j] - px[i];
+      C[i] = -(A[i] * px[i] + B[i] * py[i]);
+    }
+    for (int s = 0; s < sb.S; ++s) {
+      const double ox = double(sb.offs[size_t(s)].x), oy = double(sb.offs[size_t(s)].y);
+      int y0 = std::max(0, int(std::ceil(ly - oy))), y1 = std::min(sb.H - 1, int(std::floor(hy - oy)));
+      for (int y = y0; y <= y1; ++y) {
+        const double sy = y + oy;
+        double xl = -1e300, xr = 1e300;
+        bool empty = false;
+        for (int i = 0; i < ob.n && !empty; ++i) {
+          double r = B[i] * sy + C[i];  // need A x + r >= 0
+          if (A[i] > 0) xl = std::max(xl, -r / A[i]);
+          else if (A[i] < 0) xr = std::min(xr, -r / A[i]);
+          else if (r < 0) empty = true;
+        }
+        if (empty || xl > xr) continue;
+        int x0 = std::max(0, int(std::ceil(xl - ox))), x1 = std::min(sb.W - 1, int(std::floor(xr - ox)));
+        for (int x = x0; x <= x1; ++x) {
           size_t k = sb.idx(x, y, s);
           if (shadowPass)
             sb.flag[k] = 1;
@@ -156,6 +166,8 @@ void beamPrimary(BeamTracer& bt, const Camera& cam, bool cull, BeamOutput& out, 
   d.rootBeams -= before.rootBeams;
   d.presplitBeams -= before.presplitBeams;
   d.mailboxSkips -= before.mailboxSkips;
+  d.fiveSplits -= before.fiveSplits;
+  d.visibleTris -= before.visibleTris;
   d.droppedArea -= before.droppedArea;
   rs.trace.add(d);
   std::unordered_set<int> vis;
@@ -262,6 +274,8 @@ void beamPointShadows(BeamTracer& bt, const Scene& scene, const Camera& cam, con
   d.rootBeams -= before.rootBeams;
   d.presplitBeams -= before.presplitBeams;
   d.mailboxSkips -= before.mailboxSkips;
+  d.fiveSplits -= before.fiveSplits;
+  d.visibleTris -= before.visibleTris;
   d.droppedArea -= before.droppedArea;
   rs.trace.add(d);
 }
