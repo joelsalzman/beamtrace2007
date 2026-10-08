@@ -83,6 +83,14 @@ BT_HD inline void splitFive(const Poly2& p, Poly2& a, Poly2& b) {
   b.push(p.x[4], p.y[4]);
 }
 
+// Optional per-phase cycle counters (device profiling with -DBT_PROFILE_CYCLES;
+// no-ops otherwise).
+#if defined(__CUDA_ARCH__) && defined(BT_PROFILE_CYCLES)
+BT_HD inline long long btClock() { return clock64(); }
+#else
+BT_HD inline long long btClock() { return 0; }
+#endif
+
 template <class S>
 class BeamCore {
  public:
@@ -92,12 +100,14 @@ class BeamCore {
   BT_HD BeamCore(const SceneView& sv, S& st) : sv_(sv), st_(st) {}
 
   TraceStats stats;
+  long long cyc[4] = {0, 0, 0, 0};  // descent, leaf, advance, root setup (device only)
   bool useMailbox = true;
   bool orderEdges = true;  // clip by the most-cutting triangle edge first
   int lastReason = 0;      // deciding step of the last intersect() (tests)
 
   // Traces convex root polygons (plane coordinates) through the scene.
   BT_HD void trace(const BeamQuery& query, const Poly2* roots, int numRoots) {
+    long long c0 = btClock();
     st_.beginTrace();
     Real ext = 0;
     for (int i = 0; i < numRoots; ++i) ext = bmax(ext, roots[i].extent());
@@ -108,12 +118,17 @@ class BeamCore {
       if (p.area() < 0) p.reverse();
       addRoot(p);
     }
+    cyc[3] += btClock() - c0;
     const Vec3& O = q_.plane.O;
     CoreWork w;
     while (!st_.overflow && st_.popWork(w)) {
+      // Frames form parent chains toward smaller indices, and work is LIFO:
+      // frames above every pending item's frame are dead and can be reused.
+      st_.truncateFrames(bmax(w.frame, st_.maxPendingFrame()) + 1);
       uint32_t node = w.node;
       AABB box = w.box;
       int frame = w.frame;
+      long long c1 = btClock();
       for (;;) {
         const KdNode& kn = sv_.nodes[node];
         if (kn.isLeaf()) break;
@@ -158,15 +173,21 @@ class BeamCore {
           box = bo;
         }
       }
+      long long c2 = btClock();
+      cyc[0] += c2 - c1;
       const KdNode& leaf = sv_.nodes[node];
       if (leaf.count() == 0) {  // empty leaf: just move on
         stats.leafVisits++;
         advance(w.beam, frame);
+        cyc[2] += btClock() - c2;
         continue;
       }
       processLeaf(w.beam, leaf);
+      long long c3 = btClock();
+      cyc[1] += c3 - c2;
       const int n = st_.listSize(cur_);
       for (int i = 0; i < n && !st_.overflow; ++i) advance(st_.listAt(cur_, i), frame);
+      cyc[2] += btClock() - c3;
     }
   }
 
@@ -485,7 +506,9 @@ class BeamCore {
 
   BT_HD void intersect(int beamIdx, int t, const CoreTriInfo& ti) {
     stats.triTests++;
-    const CoreBeam B = st_.beam(beamIdx);
+    // Reference for the cheap early-out tests; copied only before splitting
+    // (the slot is recycled while the pieces are emitted).
+    const CoreBeam& B = st_.beam(beamIdx);
     if (B.hit == t) {
       keep(beamIdx);
       return;
@@ -528,7 +551,7 @@ class BeamCore {
         st_.freeBeam(beamIdx);
         return;
       }
-      CoreBeam& b = st_.beam(beamIdx);
+      CoreBeam& b = st_.beam(beamIdx);  // (same object as B)
       b.hit = t;
       b.farA = rabs(b.qx * ti.A[0] + b.qy * ti.A[1] + ti.A[2]);
       b.farC = ti.C < 0 ? -ti.C : ti.C;
@@ -619,9 +642,10 @@ class BeamCore {
     }
     stats.splits++;
     lastReason = 8;
-    st_.freeBeam(beamIdx);  // B is a copy; its slot can be reused by the pieces
-    for (int i = 0; i < st_.polySize(0); ++i) emit(st_.polyAt(0, i), B, -1, false, t);
-    for (int i = 0; i < st_.polySize(1); ++i) emit(st_.polyAt(1, i), B, t, true, t);
+    const CoreBeam parent = B;  // copy: the slot is reused by the pieces
+    st_.freeBeam(beamIdx);
+    for (int i = 0; i < st_.polySize(0); ++i) emit(st_.polyAt(0, i), parent, -1, false, t);
+    for (int i = 0; i < st_.polySize(1); ++i) emit(st_.polyAt(1, i), parent, t, true, t);
   }
 
   BT_HD bool testLine(const CoreBeam& B, const Line2& line, Line2* L, int& nl, bool& allIn) const {

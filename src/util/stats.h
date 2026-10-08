@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include "core/real.h"
+
 namespace bt {
 
 struct TraceStats {
@@ -20,7 +22,7 @@ struct TraceStats {
   uint64_t rays = 0;          // rays traced
   double droppedArea = 0;     // cross-section area lost to degenerate slivers (plane units)
 
-  void add(const TraceStats& o) {
+  BT_HD void add(const TraceStats& o) {
     kdSteps += o.kdSteps;
     leafVisits += o.leafVisits;
     triTests += o.triTests;

@@ -15,15 +15,16 @@ This repository implements the paper's beam tracer:
 
 It also includes the paper's comparison baseline, a one-ray-at-a-time kd-tree ray tracer, and a benchmark harness that reproduces the paper's tables and figures (Figs. 5–13).
 
-The CPU version follows the paper's design. It uses C++17 and keeps the four corner rays of a beam in one SIMD register: SSE `__m128` for float, AVX2 `__m256d` for double. A CUDA port is in progress in [`cuda/`](cuda/).
+The CPU version follows the paper's design. It uses C++17 and keeps the four corner rays of a beam in one SIMD register: SSE `__m128` for float, AVX2 `__m256d` for double. The CUDA port in [`cuda/`](cuda/) runs the same algorithm code on the GPU (see [CUDA port](#cuda-port)).
 
 ## Quick start
 
 ```sh
 git clone https://github.com/joelsalzman/beamtrace2007.git && cd beamtrace2007
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release        # add -DBT_CUDA=ON to also build the GPU port
 cmake --build build -j
 ./build/bt_tests_f && ./build/bt_tests_d               # correctness tests (float and double)
+./build/cuda/bt_tests_cuda                             # GPU vs CPU tests (with -DBT_CUDA=ON)
 scripts/fetch_scenes.sh                                # Sponza, Conference, Armadillo (~8 MB)
 scripts/run_paper_benchmarks.sh                        # full benchmark -> results/REPORT.md
 ```
@@ -32,7 +33,7 @@ Requirements:
 - CMake ≥ 3.18 and a C++17 compiler (GCC or Clang).
 - x86-64 with SSE2. `-march=native` is on by default; turn it off with `-DBT_NATIVE=OFF`. `-DBT_SIMD=OFF` gives a portable scalar build.
 - Python 3 for the report; plots also need matplotlib.
-- The CUDA port (in progress) will need CUDA ≥ 11.
+- The CUDA port needs the CUDA toolkit (tested with 11.8) and a matching host compiler. The GPU architecture defaults to the local GPU (CMake ≥ 3.24); override it with e.g. `-DCMAKE_CUDA_ARCHITECTURES=86`.
 
 Rendering a single image:
 
@@ -51,17 +52,21 @@ Useful options:
 - `--light-scale S` scales the area light (used for Fig. 13).
 - `--no-mailbox` turns off the Post Office mailboxing.
 - `bt_render_d` is the double-precision build.
+- `cuda/bt_render_cuda` takes the same options and runs on the GPU (`--device cpu` switches back).
 
 ## Running on another machine (e.g. frabjous)
 
 ```sh
 git pull
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-./build/bt_tests_f && ./build/bt_tests_d
-scripts/run_paper_benchmarks.sh          # QUICK=1 for a 2-minute smoke run; THREADS=$(nproc) adds a scaling run
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBT_CUDA=ON && cmake --build build -j   # drop -DBT_CUDA=ON without a GPU
+./build/bt_tests_f && ./build/bt_tests_d && ./build/cuda/bt_tests_cuda
+THREADS=$(nproc) scripts/run_paper_benchmarks.sh    # QUICK=1 for a ~2-minute smoke run
 ```
 
-Results land in `results/` (CSV files, PNG/PFM images and `REPORT.md`, which puts our numbers next to the paper's).
+Results land in `results/`: CSV files, PNG/PFM images and `REPORT.md`, which puts our numbers next to the paper's.
+- The CUDA runs are added automatically when `build/cuda/bt_render_cuda` exists and a GPU is present (`CUDA=0` skips them).
+- `THREADS` adds a multi-threaded soft-shadow run.
+- A full run takes about 10 minutes on an 8-core desktop.
 
 ## Scenes
 
@@ -118,6 +123,36 @@ Hit beams keep traversing until the next cell lies wholly beyond the hit (Fig. 4
 8. **Procedural stand-ins** replace Erw6, Soda Hall and the plant, and the McGuire Conference model is coarser than the paper's. Absolute numbers are therefore not comparable; compare ratios and trends.
 9. **Separate SAH tuning per method.** Each method builds its own kd-tree. Beams prefer larger leaves (SAH intersection cost 0.4); rays use the standard 1.5. `--kd-ci` overrides either.
 
+## CUDA port
+
+[`cuda/gpu_render.cu`](cuda/gpu_render.cu) runs the CPU tracer's algorithm on the GPU. `BeamCore` (in [`src/beam/beam_core.h`](src/beam/beam_core.h)) is a host/device template over a storage policy:
+- On the CPU, the storage is growable `std::vector`s.
+- On the GPU, each thread has fixed-size arrays in local memory. Their sizes come from measured high-water marks.
+
+If a thread runs out of storage, it flags its work item. The host then recomputes that item with the CPU tracer, so the output stays exact. A full 512² frame typically has 0–20 such pixels.
+
+Three kernels:
+- **Soft shadows:** one thread per pixel, after a GPU primary-ray kernel. The kernel uses persistent warps: each warp fetches 8×4 pixel tiles so its lanes trace similar beams.
+- **Primary visibility:** one thread per 16×16 pixel tile (each tile is a root beam).
+- **Point-light shadows:** one thread per primary hit beam.
+
+Two GPU-specific settings:
+- **No mailboxing.** With small per-thread tables in local memory, the Post Office costs more than it saves.
+- **Recompute triangle setup** instead of caching it.
+
+**Validation.** `bt_tests_cuda` compares GPU and CPU output:
+- Soft-shadow visibility agrees to about 1e-6 on average; the maximum difference is 6e-3, at a few pixels where float rounding differs.
+- Primary visibility and point-shadow masks agree at every interior pixel.
+
+**Performance, honestly.** On an RTX 2060 SUPER, soft shadows run 2–4× faster than one CPU core (Ryzen 5800X3D), but slower than all 16 CPU threads. Primary visibility per tile is slower than the CPU.
+
+The algorithm keeps deep, irregular per-beam state: a beam pool, a work stack, a frame stack and polygon scratch space, about 12 KB per thread. Lanes in a warp follow different paths through the kd-tree and the splitting code. As a result:
+- Local-memory traffic dominates.
+- Divergence serializes the warp.
+- Adding warps per SM does not help.
+
+A fast GPU version would need a warp-cooperative redesign. For example, a warp could test a leaf's triangles in parallel against a shared beam, or process a pixel's beam pieces as a batch. That is future work. The paper itself is a CPU algorithm and used the GPU only for rasterization.
+
 ## Correctness tests
 
 `bt_tests_f` and `bt_tests_d` run the same suite in float and double:
@@ -132,16 +167,16 @@ Hit beams keep traversing until the next cell lies wholly beyond the hit (Fig. 4
 
 ```
 src/core     Real/Vec3 and the 4-lane R4 SIMD type
-src/beam     the beam tracer (beam_tracer.*) and 2D polygon geometry (beam_geom.h)
+src/beam     the beam algorithm (beam_core.h, host+device), CPU tracer (beam_tracer.*), 2D polygon geometry (beam_geom.h)
 src/accel    SAH kd-tree
-src/ray      the baseline ray tracer
+src/ray      the baseline ray tracer (ray_core.h, host+device)
 src/render   camera, rasterizer, primary / point-shadow / soft-shadow pipelines
 src/scene    meshes, OBJ/PLY loaders, procedural scenes, config files
 apps         bt_render, bt_compare
 tests        correctness tests
 scripts      fetch_scenes.sh, run_paper_benchmarks.sh, make_report.py
 configs      scene configs (camera paths, lights)
-cuda         GPU port
+cuda         GPU port (gpu_render.cu) and GPU-vs-CPU tests
 ```
 
 ## License

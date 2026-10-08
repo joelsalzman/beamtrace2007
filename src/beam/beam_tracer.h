@@ -1,6 +1,7 @@
 // CPU beam tracer: BeamCore (beam_core.h) with growable host storage.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +29,7 @@ struct HostBeamStorage {
   std::vector<CoreBeam> pool;
   std::vector<int> freeList;
   std::vector<CoreWork> work;
+  std::vector<int> workMaxFrame;  // prefix maximum of pending work items' frames
   std::vector<CoreFrame> frames;
   std::vector<int> lists[2];
   std::vector<Poly2> polys[2];
@@ -55,6 +57,7 @@ struct HostBeamStorage {
   CoreBeam& beam(int i) { return pool[size_t(i)]; }
   void freeBeam(int i) { freeList.push_back(i); }
   bool pushWork(const CoreWork& w) {
+    workMaxFrame.push_back(work.empty() ? w.frame : std::max(w.frame, workMaxFrame.back()));
     work.push_back(w);
     return true;
   }
@@ -62,7 +65,12 @@ struct HostBeamStorage {
     if (work.empty()) return false;
     w = work.back();
     work.pop_back();
+    workMaxFrame.pop_back();
     return true;
+  }
+  int maxPendingFrame() const { return workMaxFrame.empty() ? -1 : workMaxFrame.back(); }
+  void truncateFrames(int n) {
+    if (n < int(frames.size())) frames.resize(size_t(n));
   }
   int pushFrame(const CoreFrame& f) {
     frames.push_back(f);

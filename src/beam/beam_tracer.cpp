@@ -20,6 +20,7 @@ void HostBeamStorage::beginTrace() {
   pool.clear();
   freeList.clear();
   work.clear();
+  workMaxFrame.clear();
   frames.clear();
   lists[0].clear();
   lists[1].clear();

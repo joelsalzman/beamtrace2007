@@ -310,70 +310,18 @@ void rayPointShadows(const RayTracer& rt, const Scene& scene, const Camera& cam,
   rs.traceSeconds += timer.seconds();
 }
 
-Real polygonFormFactorG(const Vec3& x, const Vec3& n, const Vec3* poly, int count) {
-  double sum = 0;
-  for (int i = 0; i < count; ++i) {
-    Vec3 a = poly[i] - x, b = poly[(i + 1) % count] - x;
-    double la = length(a), lb = length(b);
-    if (la == 0 || lb == 0) continue;
-    double c = std::max(-1.0, std::min(1.0, double(dot(a, b)) / (la * lb)));
-    double theta = std::acos(c);
-    Vec3 g = cross(a, b);
-    double lg = length(g);
-    if (lg == 0) continue;
-    sum += theta * double(dot(g, n)) / lg;
-  }
-  return Real(std::fabs(sum) * 0.5);
-}
-
-namespace {
-
-// Plane through the light; the shading point x is the apex.
-BeamQuery lightQuery(const Vec3& apex, const AreaLight& L, int tri) {
-  BeamQuery q;
-  q.plane = BeamPlane::make(apex, L.c, L.U, L.V);
-  q.mode = BeamMode::AnyHit;
-  q.farIsPlane = true;
-  q.excludeTri = tri;
-  return q;
-}
-
-}  // namespace
-
 Real beamLightVisibility(BeamTracer& bt, const Vec3& x, const Vec3& ns, int tri, const AreaLight& L,
                          Real offset, Real* exactG) {
   if (exactG) *exactG = 0;
-  Vec3 nL = L.n();
-  if (!(dot(x - L.c, nL) > 0)) return 0;  // behind the emitter
-  Vec3 apex = x + ns * offset;
-  BeamQuery q = lightQuery(apex, L, tri);
-  // Light quad in plane coordinates, clipped by the horizon of x.
-  Vec3 corners[4] = {L.c - L.U * Real(0.5) - L.V * Real(0.5), L.c + L.U * Real(0.5) - L.V * Real(0.5),
-                     L.c + L.U * Real(0.5) + L.V * Real(0.5), L.c - L.U * Real(0.5) + L.V * Real(0.5)};
-  Poly2 quad;
-  for (auto& c : corners) {
-    Real qx, qy;
-    q.plane.coords(c, qx, qy);
-    quad.push(qx, qy);
-  }
-  if (quad.area() < 0) quad.reverse();
-  // horizon: ns . (p - x) >= 0, p = p0 + qx u + qy v
-  Line2 hz;
-  hz.a = dot(ns, q.plane.u);
-  hz.b = dot(ns, q.plane.v);
-  hz.c = dot(ns, L.c - x);
-  Poly2 in, out;
-  splitPoly(quad, hz, 0, in, out);
-  int above = 0;
-  for (int i = 0; i < quad.n; ++i) above += hz.eval(quad.x[i], quad.y[i]) > 0;
-  Poly2 root = above == quad.n ? quad : in;
-  if (above == 0 || root.n < 3 || !(root.area() > 0)) return 0;
+  BeamQuery q;
+  Poly2 root;
+  Real lightArea;
+  if (!lightBeamSetup(L, x, ns, tri, offset, q, root, lightArea)) return 0;
   BeamOutput out2;
   bool keep = bt.keepOutput;
   bt.keepOutput = exactG != nullptr;
   bt.trace(q, &root, 1, out2);
   bt.keepOutput = keep;
-  Real lightArea = std::fabs(quad.area());
   Real V = Real(out2.missArea) / lightArea;
   if (exactG) {
     Real G = 0;
@@ -432,7 +380,6 @@ void softShadows(const Scene& scene, const KdTree& tree, const Camera& cam, cons
   res.Eunocc.assign(res.vis.size(), 0.f);
   res.tri.assign(res.vis.size(), -1);
   const Real offset = length(scene.bounds.diag()) * kEpsRel;
-  const Vec3 nL = light.n();
   const Real A = light.area();
 
   // Primary visibility with the ray tracer (as in the paper, Sec. 5.1).
@@ -484,11 +431,7 @@ void softShadows(const Scene& scene, const KdTree& tree, const Camera& cam, cons
         if (T < 0) continue;
         const Vec3& p = X[k];
         const Vec3& n = N[k];
-        Vec3 w = light.c - p;
-        Real r2 = dot(w, w);
-        Vec3 wn = w / std::sqrt(r2);
-        Real G0 = std::max(Real(0), dot(n, wn)) * std::max(Real(0), -dot(nL, wn)) / r2;
-        if (!(dot(p - light.c, nL) > 0)) G0 = 0;
+        Real G0 = lightCenterG(light, p, n);
         Real V, Gx = 0;
         if (opt.useBeams) {
           V = beamLightVisibility(btr, p, n, T, light, offset, opt.exact ? &Gx : nullptr);
@@ -537,6 +480,66 @@ Image shadeSoft(const Scene& scene, const SoftResult& res, Real exposure, const 
       img.set(x, y, float(alb.x) * e, float(alb.y) * e, float(alb.z) * e);
     }
   return img;
+}
+
+}  // namespace bt
+
+namespace bt {
+
+void softShadowPixelsCPU(const Scene& scene, const KdTree& tree, const AreaLight& light, const SoftOptions& opt,
+                         const std::vector<size_t>& pixels, const std::vector<Vec3>& X, const std::vector<Vec3>& N,
+                         SoftResult& res, TraceStats& stats) {
+  const Real offset = length(scene.bounds.diag()) * kEpsRel;
+  std::atomic<size_t> next(0);
+  std::vector<TraceStats> st(size_t(std::max(1, opt.threads)));
+  auto worker = [&](int id) {
+    BeamTracer btr(scene, tree);
+    btr.useMailbox = opt.mailbox;
+    btr.keepOutput = false;
+    for (size_t i = next++; i < pixels.size(); i = next++) {
+      size_t k = pixels[i];
+      Real Gx = 0;
+      Real V = beamLightVisibility(btr, X[k], N[k], res.tri[k], light, offset, opt.exact ? &Gx : nullptr);
+      res.vis[k] = float(V);
+      res.E[k] = opt.exact ? float(Gx) : float(light.area() * lightCenterG(light, X[k], N[k]) * V);
+    }
+    st[size_t(id)].add(btr.stats);
+  };
+  std::vector<std::thread> th;
+  for (int i = 1; i < opt.threads; ++i) th.emplace_back(worker, i);
+  worker(0);
+  for (auto& t : th) t.join();
+  for (auto& s : st) stats.add(s);
+}
+
+}  // namespace bt
+
+namespace bt {
+
+void primaryRootsCPU(const Scene& scene, const KdTree& tree, const Camera& cam, bool cull,
+                     const std::vector<Poly2>& roots, std::vector<OutBeam>& hitBeams, TraceStats& stats) {
+  BeamTracer btr(scene, tree);
+  BeamQuery q;
+  q.plane = cam.plane();
+  q.mode = BeamMode::Nearest;
+  q.cullBackfaces = cull;
+  BeamOutput out;
+  for (const Poly2& r : roots) {
+    btr.trace(q, &r, 1, out);
+    for (const OutBeam& ob : out.beams)
+      if (ob.tri >= 0) hitBeams.push_back(ob);
+  }
+  stats.add(btr.stats);
+}
+
+void pointShadowsCPU(const Scene& scene, const KdTree& tree, const Camera& cam, const std::vector<OutBeam>& primaryHits,
+                     const Vec3& light, std::vector<OutBeam>& shadowPolys, TraceStats& stats) {
+  BeamTracer btr(scene, tree);
+  BeamOutput prim;
+  prim.beams = primaryHits;
+  RenderStats rs;
+  beamPointShadows(btr, scene, cam, prim, light, shadowPolys, rs);
+  stats.add(rs.trace);
 }
 
 }  // namespace bt

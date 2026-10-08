@@ -12,14 +12,18 @@
 #   QUICK=0|1        quick mode
 #   THREADS=1        extra thread count for the soft-shadow scaling run (1 = skip)
 #   NO_FETCH=1       do not download scenes (scenes that are missing are skipped)
-#   DEVICE=cpu|cuda  also run the CUDA port when built with -DBT_CUDA=ON (cuda adds GPU columns)
+#   CUDA=auto|0|1    run the CUDA port (auto: if $BUILD/cuda/bt_render_cuda exists and a GPU is present)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BUILD=${BUILD:-build}
 OUT=${OUT:-results}
 QUICK=${QUICK:-0}
 THREADS=${THREADS:-1}
-DEVICE=${DEVICE:-cpu}
+CUDA=${CUDA:-auto}
+RC="$BUILD/cuda/bt_render_cuda"
+if [ "$CUDA" = auto ]; then
+  if [ -x "$RC" ] && command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then CUDA=1; else CUDA=0; fi
+fi
 
 if [ ! -x "$BUILD/bt_render" ]; then
   cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
@@ -125,15 +129,23 @@ if [ "$THREADS" -gt 1 ] && have sponza; then
        --csv "$OUT/threads.csv" --quiet
   done
 fi
-if [ "$DEVICE" = cuda ] && [ -x "$BUILD/bt_render_cuda" ]; then
-  echo "== CUDA"
+if [ "$CUDA" = 1 ]; then
+  echo "== CUDA port"
   rm -f "$OUT/cuda.csv"
   for sc in plant sponza conference building; do
     have $sc || continue
-    "$BUILD/bt_render_cuda" --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \
+    "$RC" --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \
        --out "$OUT/img/soft_${sc}_cuda" --pfm --csv "$OUT/cuda.csv" --quiet
     m=$("$BUILD/bt_compare" "$OUT/img/soft_${sc}_beam_vis.pfm" "$OUT/img/soft_${sc}_cuda_vis.pfm")
-    echo "$sc,cuda,0,$(echo "$m" | awk '{print $2","$4","$6","$8","$10}')" >> "$OUT/softshadow_errors.csv"
+    echo "$sc,beam_cuda,0,$(echo "$m" | awk '{print $2","$4","$6","$8","$10}')" >> "$OUT/softshadow_errors.csv"
+    # same frame on all CPU threads, for comparison
+    $R --config configs/$sc.cfg --mode softshadow --method beam --res $RES_S --view 0 --threads $(nproc) \
+       --csv "$OUT/cuda.csv" --quiet --tag cpu_all_threads
+  done
+  for sc in room building sponza; do
+    have $sc || continue
+    "$RC" --config configs/$sc.cfg --mode pointshadow --method beam --res $RES_P --aa 6 --view 0 \
+       --out "$OUT/img/pointshadow_${sc}_cuda" --csv "$OUT/cuda.csv" --quiet
   done
 fi
 

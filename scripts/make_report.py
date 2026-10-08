@@ -242,14 +242,33 @@ if th:
 
 cu = read("cuda.csv")
 if cu:
-    w("## CUDA port\n")
-    w("| scene | GPU soft-shadow time | kd steps/px | isect/px |")
-    w("|---|---|---|---|")
-    for r in cu:
-        px = num(r, "W") * num(r, "H")
-        w(f"| {r['scene']} | {num(r, 'trace_s') + num(r, 'primary_s'):.3f} s | {fmt(num(r, 'kd_steps') / px)} | "
-          f"{fmt(num(r, 'tri_tests') / px)} |")
-    w("")
+    w("## CUDA port (extra)\n")
+    w("The same BeamCore runs one thread per pixel (soft shadows), per 16x16 tile (primary visibility) or per "
+      "primary hit beam (point shadows), with fixed per-thread storage; work that overflows it is redone on "
+      "the CPU (count in the log). GPU results match the CPU beams to float precision (`bt_tests_cuda`).\n")
+    soft = [r for r in cu if r["mode"] == "softshadow"]
+    if soft:
+        w("| scene | GPU soft shadows | CPU, 1 thread | CPU, all threads | GPU vs exact CPU (max abs error) |")
+        w("|---|---|---|---|---|")
+        cpu1 = {r["scene"]: num(r, "trace_s") + num(r, "primary_s") for r in ss if r["method"] == "beam" and r["tag"] == ""}
+        errg = {e["scene"]: e for e in errs if e["method"] == "beam_cuda"}
+        for r in soft:
+            if r["tag"] == "cpu_all_threads":
+                continue
+            sc = r["scene"]
+            allt = [x for x in soft if x["scene"] == sc and x["tag"] == "cpu_all_threads"]
+            e = errg.get(sc)
+            w(f"| {sc} | {num(r, 'trace_s') + num(r, 'primary_s'):.3f} s | {cpu1.get(sc, float('nan')):.3f} s | "
+              f"{(num(allt[0], 'trace_s') + num(allt[0], 'primary_s')) if allt else float('nan'):.3f} s "
+              f"({allt[0]['threads'] if allt else '-'} threads) | {float(e['max']) if e else float('nan'):.2g} |")
+        w("")
+    pt = [r for r in cu if r["mode"] == "pointshadow"]
+    if pt:
+        w("| scene | GPU primary + point shadows (incl. transfers) |")
+        w("|---|---|")
+        for r in pt:
+            w(f"| {r['scene']} | {num(r, 'trace_s') * 1000:.1f} ms |")
+        w("")
 
 # ------------------------------------------------------------------ plots
 try:

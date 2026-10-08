@@ -11,6 +11,9 @@
 #include <string>
 
 #include "render/render.h"
+#ifdef BT_WITH_CUDA
+#include "cuda/gpu_render.h"
+#endif
 #include "util/misc.h"
 
 using namespace bt;
@@ -32,6 +35,11 @@ struct Args {
   double lightScale = 1;
   double kdCi = -1, kdCt = -1;
   int cull = -1;  // -1: from config
+#ifdef BT_WITH_CUDA
+  std::string device = "cuda";
+#else
+  std::string device = "cpu";
+#endif
 };
 
 void usage() {
@@ -39,7 +47,8 @@ void usage() {
           "usage: bt_render --config FILE [--view N | --views all] [--mode primary|pointshadow|softshadow]\n"
           "                 [--method beam|ray] [--res WxH] [--aa N] [--ray-aa N] [--samples N] [--threads N]\n"
           "                 [--exact] [--no-jitter] [--no-mailbox] [--light-scale S] [--cull 0|1]\n"
-          "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet] [--info]\n");
+          "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet] [--info]\n"
+          "                 [--device cpu|cuda]  (cuda: soft shadows on the GPU; bt_render_cuda only)\n");
 }
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -79,6 +88,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
     else if (s == "--kd-ct") a.kdCt = std::atof(next().c_str());
     else if (s == "--quiet") a.quiet = true;
     else if (s == "--info") a.info = true;
+    else if (s == "--device") a.device = next();
     else if (s == "--help" || s == "-h") return false;
     else {
       fprintf(stderr, "unknown option %s\n", s.c_str());
@@ -101,7 +111,9 @@ void appendCsv(const Args& a, const SceneConfig& cfg, const Scene& scene, const 
             "raster_s,build_s,light_scale,exact,mailbox,mean_vis,five_splits,shadow_vis_tris,tag\n");
   const TraceStats& t = rs.trace;
   fprintf(f, "%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.6g,%.6f,%.6f,%.6f,%.4f,%g,%d,%d,%.6f,%llu,%llu,%s\n",
-          cfg.name.c_str(), a.mode.c_str(), a.method.c_str(), sizeof(Real) == 8 ? "double" : "float", view, a.W,
+          cfg.name.c_str(), a.mode.c_str(),
+          (a.method + (a.device == "cuda" && a.method == "beam" ? "_cuda" : "")).c_str(),
+          sizeof(Real) == 8 ? "double" : "float", view, a.W,
           a.H, a.method == "beam" ? a.aa : a.rayAA, a.samples, a.threads, scene.numTris(), rs.visibleTris,
           rs.hitBeams, (unsigned long long)t.beams, (unsigned long long)t.kdSteps,
           (unsigned long long)t.leafVisits, (unsigned long long)t.triTests, (unsigned long long)t.hits,
@@ -174,6 +186,18 @@ int main(int argc, char** argv) {
   }
   BeamTracer btr(scene, tree);
   btr.useMailbox = a.mailbox;
+#ifdef BT_WITH_CUDA
+  GpuRenderer* gpu = nullptr;
+  if (a.device == "cuda") {
+    GpuInfo gi;
+    if (!gpuAvailable(&gi)) {
+      fprintf(stderr, "no CUDA device available\n");
+      return 1;
+    }
+    if (!a.quiet) fprintf(stderr, "GPU: %s (%d SMs, %.1f GB)\n", gi.name.c_str(), gi.smCount, gi.memGB);
+    gpu = new GpuRenderer(scene, tree);
+  }
+#endif
   RayTracer rtr(scene, tree);
   for (int view = v0; view <= v1; ++view) {
     Camera cam = Camera::make(cfg.views[size_t(view)], cfg.up, a.W, a.H);
@@ -190,9 +214,32 @@ int main(int argc, char** argv) {
       SampleBuffer sb;
       if (a.method == "beam") {
         BeamOutput prim;
-        beamPrimary(btr, cam, cull, prim, rs);
         std::vector<OutBeam> shadowPolys;
-        if (shadows) beamPointShadows(btr, scene, cam, prim, light, shadowPolys, rs);
+#ifdef BT_WITH_CUDA
+        if (gpu) {
+          gpu->primary(cam, cull, prim.beams, rs);
+          if (!a.quiet)
+            fprintf(stderr, "  GPU primary: kernel %.4fs, %d tiles on the CPU (%.4fs)\n", gpu->lastKernelSeconds,
+                    gpu->lastOverflowPixels, gpu->lastFallbackSeconds);
+          std::vector<char> seen(size_t(scene.numTris()), 0);
+          rs.hitBeams = int(prim.beams.size());
+          for (const OutBeam& ob : prim.beams)
+            if (!seen[size_t(ob.tri)]) {
+              seen[size_t(ob.tri)] = 1;
+              rs.visibleTris++;
+            }
+          if (shadows) {
+            gpu->pointShadows(cam, prim.beams, light, shadowPolys, rs);
+            if (!a.quiet)
+              fprintf(stderr, "  GPU point shadows: kernel %.4fs, %d beams on the CPU (%.4fs)\n",
+                      gpu->lastKernelSeconds, gpu->lastOverflowPixels, gpu->lastFallbackSeconds);
+          }
+        } else
+#endif
+        {
+          beamPrimary(btr, cam, cull, prim, rs);
+          if (shadows) beamPointShadows(btr, scene, cam, prim, light, shadowPolys, rs);
+        }
         Timer tr;
         sb.init(a.W, a.H, a.aa);
         rasterize(prim.beams, cam, sb, false);
@@ -239,7 +286,22 @@ int main(int argc, char** argv) {
       so.threads = a.threads;
       so.mailbox = a.mailbox;
       SoftResult res;
+#ifdef BT_WITH_CUDA
+      if (gpu && so.useBeams) {
+        gpu->softShadows(cam, L, so, res);
+        if (!a.quiet)
+          fprintf(stderr, "  GPU: shadow kernel %.4fs, %d overflow pixels recomputed on the CPU in %.4fs\n",
+                  gpu->lastKernelSeconds, gpu->lastOverflowPixels, gpu->lastFallbackSeconds);
+      } else {
+        softShadows(scene, tree, cam, L, so, res);
+      }
+#else
+      if (a.device != "cpu") {
+        fprintf(stderr, "this binary has no CUDA support (use bt_render_cuda)\n");
+        return 2;
+      }
       softShadows(scene, tree, cam, L, so, res);
+#endif
       rs = res.stats;
       double sum = 0;
       int cnt = 0;
