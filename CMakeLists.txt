@@ -14,6 +14,11 @@ option(BT_TESTS "Build tests" ON)
 
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
                     $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-maybe-uninitialized>)
+# No implicit fused multiply-adds: otherwise the compiler fuses differently
+# depending on inlining, and the depth-first tracer, its stackless variant and
+# the wavefront reference engine (which share their arithmetic) would differ
+# in the last bits. The cost is within noise.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off>)
 if(BT_NATIVE)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-march=native>)
 endif()
@@ -49,6 +54,10 @@ target_link_libraries(bt_render bt_f)
 add_executable(bt_render_d apps/bt_render.cpp)
 target_link_libraries(bt_render_d bt_d)
 add_executable(bt_compare apps/bt_compare.cpp)
+foreach(prec f d)
+  add_executable(bt_golden_${prec} apps/bt_golden.cpp)
+  target_link_libraries(bt_golden_${prec} bt_${prec})
+endforeach()
 
 if(BT_TESTS)
   enable_testing()
