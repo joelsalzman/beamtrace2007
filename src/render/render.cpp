@@ -6,6 +6,7 @@
 #include <thread>
 #include <unordered_set>
 
+#include "render/point_core.h"
 #include "util/misc.h"
 
 namespace bt {
@@ -214,53 +215,18 @@ void beamPointShadows(BeamTracer& bt, const Scene& scene, const Camera& cam, con
   for (const OutBeam& pb : primary.beams) {
     if (pb.tri < 0) continue;
     const int T = pb.tri;
-    const Vec3 nT = scene.triN[size_t(T)];
-    const Vec3 P0 = scene.v(T, 0);
-    Real sideCam = dot(nT, cam.eye - P0), sideL = dot(nT, light - P0);
-    if (!(sideCam * sideL > 0)) {  // receiver faces away from the light: fully shadowed
-      shadowPolys.push_back(pb);
-      continue;
-    }
-    // Back-project the beam's corners onto the receiver plane (a homography).
-    Vec3 X[4];
-    for (int i = 0; i < pb.n; ++i) {
-      Vec3 d = cam.dir(pb.x[i], pb.y[i]);
-      X[i] = cam.eye + d * (dot(nT, P0 - cam.eye) / dot(nT, d));
-    }
-    Vec3 tu = anyOrthogonal(nT);
     BeamQuery q;
-    q.plane = BeamPlane::make(light, P0, tu, cross(nT, tu));
-    q.mode = BeamMode::AnyHit;
-    q.farIsPlane = true;
-    q.excludeTri = T;
     Poly2 root;
-    for (int i = 0; i < pb.n; ++i) {
-      Real qx, qy;
-      q.plane.coords(X[i], qx, qy);
-      root.push(qx, qy);
+    if (!pointShadowSetup(cam.eye, cam.fwd, cam.right, cam.down, scene.triN[size_t(T)], scene.v(T, 0), T, light,
+                          pb.x, pb.y, pb.n, q, root)) {
+      shadowPolys.push_back(pb);  // receiver faces away from the light: fully shadowed
+      continue;
     }
     bt.trace(q, &root, 1, out);
     for (const OutBeam& sb : out.beams) {
       if (sb.tri < 0) continue;
       OutBeam ip;
-      ip.n = sb.n;
-      ip.tri = T;
-      ip.area = 0;
-      bool ok = true;
-      for (int i = 0; i < sb.n; ++i) ok = ok && camPlane.project(q.plane.point(sb.x[i], sb.y[i]), ip.x[i], ip.y[i]);
-      if (!ok) continue;
-      // Keep counter-clockwise orientation in image coordinates.
-      Poly2 p;
-      for (int i = 0; i < ip.n; ++i) p.push(ip.x[i], ip.y[i]);
-      if (!(std::fabs(p.area()) > 0)) continue;  // receiver seen exactly edge-on
-      if (p.area() < 0) {
-        p.reverse();
-        for (int i = 0; i < ip.n; ++i) {
-          ip.x[i] = p.x[i];
-          ip.y[i] = p.y[i];
-        }
-      }
-      shadowPolys.push_back(ip);
+      if (pointShadowToImage(camPlane, q.plane, sb.x, sb.y, sb.n, T, ip)) shadowPolys.push_back(ip);
     }
   }
   rs.traceSeconds += timer.seconds();

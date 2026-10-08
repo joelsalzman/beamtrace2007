@@ -32,6 +32,7 @@ set(BT_SOURCES
   src/scene/procedural.cpp
   src/accel/kdtree.cpp
   src/beam/beam_tracer.cpp
+  src/beam/wavefront.cpp
   src/render/render.cpp
 )
 
@@ -63,7 +64,7 @@ if(BT_TESTS)
   enable_testing()
   foreach(prec f d)
     add_executable(bt_tests_${prec} tests/test_main.cpp tests/test_geometry.cpp tests/test_tracing.cpp
-                                  tests/test_continuation.cpp)
+                                  tests/test_continuation.cpp tests/test_wavefront.cpp)
     target_link_libraries(bt_tests_${prec} bt_${prec})
     target_include_directories(bt_tests_${prec} PRIVATE ${CMAKE_SOURCE_DIR})
     add_test(NAME tests_${prec} COMMAND bt_tests_${prec})
