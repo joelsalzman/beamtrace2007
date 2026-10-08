@@ -122,16 +122,19 @@ fi
 
 # ---------------------------------------------------------------- extras
 rm -f "$OUT/threads.csv"
-if [ "$THREADS" -gt 1 ] && have sponza; then
+if [ "$THREADS" -gt 1 ]; then
   echo "== multi-threaded soft shadows ($THREADS threads)"
-  for m in beam ray; do
-    $R --config configs/sponza.cfg --mode softshadow --method $m --res $RES_S --view 0 --threads $THREADS \
-       --csv "$OUT/threads.csv" --quiet
+  for sc in plant sponza conference building; do
+    have $sc || continue
+    for m in beam ray; do
+      $R --config configs/$sc.cfg --mode softshadow --method $m --res $RES_S --view 0 --threads $THREADS \
+         --csv "$OUT/threads.csv" --quiet
+    done
   done
 fi
+rm -f "$OUT/cuda.csv"
 if [ "$CUDA" = 1 ]; then
   echo "== CUDA port"
-  rm -f "$OUT/cuda.csv"
   for sc in plant sponza conference building; do
     have $sc || continue
     "$RC" --config configs/$sc.cfg --mode softshadow --res $RES_S --view 0 \

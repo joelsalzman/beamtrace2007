@@ -240,10 +240,26 @@ if ls:
 th = read("threads.csv")
 if th:
     w("## Multi-threaded soft shadows (extra, not in the paper)\n")
-    w("| scene | method | threads | time |")
-    w("|---|---|---|---|")
-    for r in th:
-        w(f"| {r['scene']} | {r['method']} | {r['threads']} | {num(r, 'trace_s') + num(r, 'primary_s'):.2f} s |")
+    w("Same frames as the soft-shadow table, with pixels split across threads. Times include the "
+      "(also multi-threaded) primary rays.\n")
+    w("| scene | beam, 1 thread | beam, N threads | scaling | rays (256), 1 thread | rays (256), N threads | scaling | "
+      "beam vs rays at N threads |")
+    w("|---|---|---|---|---|---|---|---|")
+    one = {}
+    for r in ss:
+        if r["tag"] == "" and (r["method"] == "beam" or (r["method"] == "ray" and r["samples"] == "256")):
+            one[(r["scene"], r["method"])] = num(r, "trace_s") + num(r, "primary_s")
+    multi = {(r["scene"], r["method"]): r for r in th}
+    for sc in OrderedDict((r["scene"], 1) for r in th):
+        b, ry = multi.get((sc, "beam")), multi.get((sc, "ray"))
+        if not b or not ry:
+            continue
+        bt = num(b, "trace_s") + num(b, "primary_s")
+        rt = num(ry, "trace_s") + num(ry, "primary_s")
+        b1, r1 = one.get((sc, "beam"), float("nan")), one.get((sc, "ray"), float("nan"))
+        n = b["threads"]
+        w(f"| {sc} | {b1:.2f} s | {bt:.3f} s ({n}) | {b1 / bt:.1f}x | {r1:.2f} s | {rt:.3f} s ({n}) | {r1 / rt:.1f}x | "
+          f"{rt / bt:.1f}x |")
     w("")
 
 cu = read("cuda.csv")
