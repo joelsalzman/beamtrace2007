@@ -18,7 +18,19 @@
 #include <immintrin.h>
 #endif
 
+// Each backend lives in its own inline namespace, so translation units built
+// with different backends (SSE host code, generic CUDA code) never share a
+// definition of R4 or of anything built on it.
+#if defined(BT_R4_SSE)
+#define BT_R4_NS r4_sse
+#elif defined(BT_R4_AVX)
+#define BT_R4_NS r4_avx
+#else
+#define BT_R4_NS r4_generic
+#endif
+
 namespace bt {
+inline namespace BT_R4_NS {
 
 constexpr int kAll4 = 0xF;
 
@@ -93,7 +105,7 @@ inline R4 rot1(R4 a) { return _mm256_permute4x64_pd(a.v, _MM_SHUFFLE(0, 3, 2, 1)
 
 #else
 
-struct R4 {
+struct alignas(16) R4 {
   Real v[4];
   BT_HD R4() {}
   BT_HD explicit R4(Real s) { v[0] = v[1] = v[2] = v[3] = s; }
@@ -149,4 +161,5 @@ BT_HD inline R4 rot1(R4 a) { return R4(a.v[1], a.v[2], a.v[3], a.v[0]); }
 
 BT_HD inline R4 fmadd(R4 a, R4 b, R4 c) { return a * b + c; }
 
+}  // inline namespace BT_R4_NS
 }  // namespace bt

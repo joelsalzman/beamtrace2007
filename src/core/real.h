@@ -38,6 +38,17 @@ constexpr Real kKdRel = Real(1e-5);
 constexpr Real kDegRel = Real(2e-6);
 #endif
 
+template <class T>
+BT_HD inline T bmin(T a, T b) { return a < b ? a : b; }
+template <class T>
+BT_HD inline T bmax(T a, T b) { return a > b ? a : b; }
+template <class T>
+BT_HD inline void bswap(T& a, T& b) {
+  T t = a;
+  a = b;
+  b = t;
+}
+
 BT_HD inline Real sgn(Real x) { return x > 0 ? Real(1) : (x < 0 ? Real(-1) : Real(0)); }
 template <class T>
 BT_HD inline T clampv(T x, T lo, T hi) { return x < lo ? lo : (x > hi ? hi : x); }

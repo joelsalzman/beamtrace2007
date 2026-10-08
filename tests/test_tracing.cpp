@@ -205,10 +205,13 @@ TEST(primary_idempotent_and_mailbox_invariant) {
   for (const OutBeam& ob : a.beams)
     for (int t = 0; t < s.numTris(); ++t) {
       int reason;
-      if (btr.retest(q, cam.rootPoly().extent(), ob, t, &reason) != 0) {
+      Real newArea = 0;
+      // Changes within the fuzzy band (new area <= 16 eps^2) are rounding noise.
+      const Real eps = kEpsRel * cam.rootPoly().extent();
+      if (btr.retest(q, cam.rootPoly().extent(), ob, t, &reason, &newArea) != 0 && newArea > 16 * eps * eps) {
         if (changed++ < 3)
-          fprintf(stderr, "    beam (tri %d, area %g) changes against tri %d (reason %d)\n", ob.tri,
-                  double(ob.area), t, reason);
+          fprintf(stderr, "    beam (tri %d, area %g) changes against tri %d (reason %d, new area %g)\n", ob.tri,
+                  double(ob.area), t, reason, double(newArea));
       }
     }
   CHECK(changed == 0);

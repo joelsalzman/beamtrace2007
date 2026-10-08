@@ -12,7 +12,7 @@ option(BT_SIMD "Use SSE (float) / AVX2 (double) intrinsics for the 4 corner rays
 option(BT_CUDA "Build the CUDA port" OFF)
 option(BT_TESTS "Build tests" ON)
 
-add_compile_options(-Wall -Wextra)
+add_compile_options(-Wall -Wextra $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-maybe-uninitialized>)
 if(BT_NATIVE)
   add_compile_options(-march=native)
 endif()
