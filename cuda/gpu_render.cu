@@ -712,9 +712,51 @@ TraceStats readStats(const unsigned long long* st) {
 
 }  // namespace
 
+namespace {
+
+Poly2 tilePoly(const Camera& cam, int tile, int tilesX, int i) {
+  int tx = i % tilesX, ty = i / tilesX;
+  int x0 = tx * tile, y0 = ty * tile, x1 = std::min(cam.W, x0 + tile), y1 = std::min(cam.H, y0 + tile);
+  Real a, b, c, d;
+  cam.pixelToQ(Real(x0), Real(y0), a, b);
+  cam.pixelToQ(Real(x1), Real(y1), c, d);
+  Poly2 p;
+  p.push(a, b);
+  p.push(c, b);
+  p.push(c, d);
+  p.push(a, d);
+  return p;
+}
+
+}  // namespace
+
 void GpuRenderer::primary(const Camera& cam, bool cull, std::vector<OutBeam>& hitBeams, RenderStats& rs, int tile) {
   Impl& I = *impl_;
   Timer total;
+  if (useWavefront) {
+    WfConfig wc;
+    wc.budget = wfPrimaryBudget;
+    wc.capacity = wfCapacity;
+    WfRunInfo wi;
+    std::vector<int> killed;
+    wfPrimary(I, wc, cam, cull, tile, hitBeams, killed, wi);
+    lastKernelSeconds = wi.ms * 1e-3;
+    lastRounds = wi.rounds;
+    lastMaxQueue = wi.maxQueue;
+    const int tilesX = (cam.W + tile - 1) / tile;
+    std::vector<Poly2> fallback;
+    for (int k : killed) fallback.push_back(tilePoly(cam, tile, tilesX, k));
+    Timer tf;
+    TraceStats fstats;
+    lastOverflowPixels = int(fallback.size());
+    if (!fallback.empty()) primaryRootsCPU(scene_, tree_, cam, cull, fallback, hitBeams, fstats);
+    lastFallbackSeconds = tf.seconds();
+    rs.trace = wi.stats;
+    rs.trace.add(fstats);
+    rs.trace.hits = hitBeams.size();
+    rs.traceSeconds += total.seconds();
+    return;
+  }
   const int tilesX = (cam.W + tile - 1) / tile, tilesY = (cam.H + tile - 1) / tile, numTiles = tilesX * tilesY;
   const int cap = 1024;
   OutBeam* dOut;
@@ -749,21 +791,8 @@ void GpuRenderer::primary(const Camera& cam, bool cull, std::vector<OutBeam>& hi
   std::vector<int> offsets;
   downloadCompacted(dOut, cap, count, over, offsets, hitBeams);
   std::vector<Poly2> fallback;
-  for (int i = 0; i < numTiles; ++i) {
-    if (over[size_t(i)]) {
-      int tx = i % tilesX, ty = i / tilesX;
-      int x0 = tx * tile, y0 = ty * tile, x1 = std::min(cam.W, x0 + tile), y1 = std::min(cam.H, y0 + tile);
-      Real a, b, c, d;
-      cam.pixelToQ(Real(x0), Real(y0), a, b);
-      cam.pixelToQ(Real(x1), Real(y1), c, d);
-      Poly2 p;
-      p.push(a, b);
-      p.push(c, b);
-      p.push(c, d);
-      p.push(a, d);
-      fallback.push_back(p);
-    }
-  }
+  for (int i = 0; i < numTiles; ++i)
+    if (over[size_t(i)]) fallback.push_back(tilePoly(cam, tile, tilesX, i));
   cudaFree(dOut);
   cudaFree(dCount);
   cudaFree(dOver);
@@ -787,6 +816,32 @@ void GpuRenderer::pointShadows(const Camera& cam, const std::vector<OutBeam>& pr
   Timer total;
   const int n = int(primHits.size());
   if (n == 0) return;
+  if (useWavefront) {
+    OutBeam* dPrim = upload(primHits.data(), primHits.size());
+    WfConfig wc;
+    wc.budget = wfBudget;
+    wc.capacity = wfCapacity;
+    WfRunInfo wi;
+    std::vector<int> killed;
+    std::vector<OutBeam> polys;
+    wfPointShadows(I, wc, cam, light, dPrim, n, polys, killed, wi);
+    cudaFree(dPrim);
+    lastKernelSeconds = wi.ms * 1e-3;
+    lastRounds = wi.rounds;
+    lastMaxQueue = wi.maxQueue;
+    shadowPolys.insert(shadowPolys.end(), polys.begin(), polys.end());
+    std::vector<OutBeam> fallback;
+    for (int k : killed) fallback.push_back(primHits[size_t(k)]);
+    Timer tf;
+    TraceStats fstats;
+    lastOverflowPixels = int(fallback.size());
+    if (!fallback.empty()) pointShadowsCPU(scene_, tree_, cam, fallback, light, shadowPolys, fstats);
+    lastFallbackSeconds = tf.seconds();
+    rs.trace.add(wi.stats);
+    rs.trace.add(fstats);
+    rs.traceSeconds += total.seconds();
+    return;
+  }
   const int cap = 64;
   OutBeam *dPrim, *dOut;
   int* dCount;

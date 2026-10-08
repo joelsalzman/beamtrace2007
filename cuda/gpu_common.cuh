@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #include "beam/beam_types.h"
 #include "cuda/gpu_render.h"
@@ -70,5 +71,18 @@ struct WfRunInfo {
 void wfSoftShadows(GpuRenderer::Impl& I, const WfConfig& cfg, const AreaLight& L, Real offset, int W, int H,
                    const int* dTri, const Vec3* dX, const Vec3* dN, bool exact, float* dVis, float* dE, float* dEu,
                    unsigned char* dOver, WfRunInfo& info);
+
+// Primary visibility, one root per tile x tile pixels: the visible polygons
+// (image plane) of all tiles except the abandoned ones (`killedTiles`, row
+// order), which the caller recomputes on the CPU.
+void wfPrimary(GpuRenderer::Impl& I, const WfConfig& cfg, const Camera& cam, bool cull, int tile,
+               std::vector<OutBeam>& hits, std::vector<int>& killedTiles, WfRunInfo& info);
+
+// Point-light shadows, one root per primary hit beam (in device memory):
+// the shadowed polygons (image plane), except for the abandoned beams
+// (`killed`).
+void wfPointShadows(GpuRenderer::Impl& I, const WfConfig& cfg, const Camera& cam, const Vec3& light,
+                    const OutBeam* dPrim, int nPrim, std::vector<OutBeam>& shadowPolys, std::vector<int>& killed,
+                    WfRunInfo& info);
 
 }  // namespace bt
