@@ -452,6 +452,41 @@ T* upload(const T* data, size_t n) {
   return d;
 }
 
+
+// Packs per-item output slices (count[i] entries at i * cap) into a dense array.
+__global__ void compactKernel(const OutBeam* in, int cap, const int* count, const int* offset, int n, OutBeam* out) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  int c = count[i];
+  for (int k = 0; k < c; ++k) out[offset[i] + k] = in[size_t(i) * size_t(cap) + size_t(k)];
+}
+
+// Downloads the outputs of `n` items (count < 0 or over[i] counts as 0) in one
+// transfer; `offsets` receives each item's start in `dense`.
+void downloadCompacted(const OutBeam* dIn, int cap, const std::vector<int>& count,
+                       const std::vector<unsigned char>& over, std::vector<int>& offsets, std::vector<OutBeam>& dense) {
+  const int n = int(count.size());
+  offsets.assign(size_t(n), 0);
+  std::vector<int> c(static_cast<size_t>(n));
+  int total = 0;
+  for (int i = 0; i < n; ++i) {
+    c[size_t(i)] = (over[size_t(i)] || count[size_t(i)] < 0) ? 0 : count[size_t(i)];
+    offsets[size_t(i)] = total;
+    total += c[size_t(i)];
+  }
+  dense.resize(size_t(total));
+  if (total == 0) return;
+  int *dC = upload(c.data(), c.size()), *dO = upload(offsets.data(), offsets.size());
+  OutBeam* dD = nullptr;
+  BT_CUDA_CHECK(cudaMalloc(&dD, size_t(total) * sizeof(OutBeam)));
+  compactKernel<<<(n + 127) / 128, 128>>>(dIn, cap, dC, dO, n, dD);
+  BT_CUDA_CHECK(cudaGetLastError());
+  BT_CUDA_CHECK(cudaMemcpy(dense.data(), dD, dense.size() * sizeof(OutBeam), cudaMemcpyDeviceToHost));
+  cudaFree(dC);
+  cudaFree(dO);
+  cudaFree(dD);
+}
+
 }  // namespace
 
 bool gpuAvailable(GpuInfo* info) {
@@ -704,7 +739,8 @@ void GpuRenderer::primary(const Camera& cam, bool cull, std::vector<OutBeam>& hi
   BT_CUDA_CHECK(cudaMemcpy(over.data(), dOver, over.size(), cudaMemcpyDeviceToHost));
   BT_CUDA_CHECK(cudaMemcpy(st, dStats, sizeof(st), cudaMemcpyDeviceToHost));
   hitBeams.clear();
-  std::vector<OutBeam> buf(static_cast<size_t>(cap));
+  std::vector<int> offsets;
+  downloadCompacted(dOut, cap, count, over, offsets, hitBeams);
   std::vector<Poly2> fallback;
   for (int i = 0; i < numTiles; ++i) {
     if (over[size_t(i)]) {
@@ -719,12 +755,7 @@ void GpuRenderer::primary(const Camera& cam, bool cull, std::vector<OutBeam>& hi
       p.push(c, d);
       p.push(a, d);
       fallback.push_back(p);
-      continue;
     }
-    if (count[size_t(i)] == 0) continue;
-    BT_CUDA_CHECK(cudaMemcpy(buf.data(), dOut + size_t(i) * cap, size_t(count[size_t(i)]) * sizeof(OutBeam),
-                             cudaMemcpyDeviceToHost));
-    hitBeams.insert(hitBeams.end(), buf.begin(), buf.begin() + count[size_t(i)]);
   }
   cudaFree(dOut);
   cudaFree(dCount);
@@ -775,12 +806,13 @@ void GpuRenderer::pointShadows(const Camera& cam, const std::vector<OutBeam>& pr
   lastKernelSeconds = ms * 1e-3;
   std::vector<int> count(static_cast<size_t>(n));
   std::vector<unsigned char> over(static_cast<size_t>(n));
-  std::vector<OutBeam> out(size_t(n) * cap);
   unsigned long long st[kNumStats];
   BT_CUDA_CHECK(cudaMemcpy(count.data(), dCount, count.size() * sizeof(int), cudaMemcpyDeviceToHost));
   BT_CUDA_CHECK(cudaMemcpy(over.data(), dOver, over.size(), cudaMemcpyDeviceToHost));
-  BT_CUDA_CHECK(cudaMemcpy(out.data(), dOut, out.size() * sizeof(OutBeam), cudaMemcpyDeviceToHost));
   BT_CUDA_CHECK(cudaMemcpy(st, dStats, sizeof(st), cudaMemcpyDeviceToHost));
+  std::vector<int> offsets;
+  std::vector<OutBeam> out;
+  downloadCompacted(dOut, cap, count, over, offsets, out);
   cudaFree(dPrim);
   cudaFree(dOut);
   cudaFree(dCount);
@@ -795,7 +827,7 @@ void GpuRenderer::pointShadows(const Camera& cam, const std::vector<OutBeam>& pr
     } else if (count[size_t(j)] < 0) {
       shadowPolys.push_back(primHits[size_t(j)]);
     } else {
-      for (int k = 0; k < count[size_t(j)]; ++k) shadowPolys.push_back(out[size_t(j) * cap + size_t(k)]);
+      for (int k = 0; k < count[size_t(j)]; ++k) shadowPolys.push_back(out[size_t(offsets[size_t(j)] + k)]);
     }
   }
   Timer tf;

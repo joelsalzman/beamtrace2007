@@ -467,3 +467,32 @@ TEST(kd_ray_traversal_matches_brute_force) {
   CHECK(hits > 8000);
   CHECK_MSG(bad == 0, "%d rays missed their nearest triangle", bad);
 }
+
+TEST(ray_nearest_hit_not_swallowed_by_tie_rule) {
+  // Regression (Sponza corners): a surface closer by ~2e-5 (relative) was
+  // treated as a coplanar tie and lost on triangle id in the float build.
+  Scene s;
+  uint16_t m = s.addMaterial(Vec3(1, 1, 1));
+  // A: large, farther (tested first: leaves sort by area); B: small, closer, higher id.
+  uint32_t a0 = s.addVertex(Vec3(-2, -2, 1)), a1 = s.addVertex(Vec3(2, -2, 1)), a2 = s.addVertex(Vec3(0, 2, 1));
+  s.addTri(a0, a1, a2, m);
+  Real zb = Real(1) - Real(1.5e-5);
+  uint32_t b0 = s.addVertex(Vec3(-0.5f, -0.5f, zb)), b1 = s.addVertex(Vec3(0.5f, -0.5f, zb)),
+           b2 = s.addVertex(Vec3(0, 0.5f, zb));
+  s.addTri(b0, b1, b2, m);
+  s.finalize();
+  for (bool single : {true, false}) {
+    KdTree tree;
+    KdBuildParams kp;
+    kp.singleLeaf = single;
+    tree.build(s, kp);
+    RayTracer rt(s, tree);
+    TraceStats st;
+    Ray r;
+    r.o = Vec3(0, 0, 0);
+    r.d = Vec3(0, 0, 1);
+    RayHit h;
+    rt.intersect(r, h, st);
+    CHECK_MSG(h.tri == 1, "hit tri %d at t %.8g (expected tri 1 at %.8g)", h.tri, double(h.t), double(zb));
+  }
+}

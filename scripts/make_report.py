@@ -20,6 +20,9 @@ PAPER_SOFT = {
     "conference": ("3 s", "99 s", "3 s / 4 rays"),
     "building": ("1.78 s (Soda Hall)", "79 s", "1.84 s / 4 rays"),
 }
+# Fig. 12 "visible tris./pixel" of the shadow beams: the workload measure that
+# beam cost scales with. Our light placements differ, so compare this first.
+PAPER_SOFT_VIS = {"plant": 2.07, "sponza": 7.32, "conference": 0.90, "building": 0.81}
 PAPER_PRIMARY_FPS = {"room": "180 (Erw6)", "building": "25 (Soda Hall)", "conference": "4", "armadillo": "0.35"}
 STANDIN = {"room": "Erw6 stand-in", "building": "Soda Hall stand-in", "plant": "plant stand-in"}
 
@@ -148,9 +151,11 @@ if ss:
     w("## Soft shadows (paper Figs. 11-12)\n")
     w("One exact shadow beam per pixel (apex at the shading point, base = the light quad). Times include "
       "the ray-traced primary visibility, as in the paper. Errors are the visible light fraction of the ray "
-      "tracer measured against the exact beam result.\n")
+      "tracer measured against the exact beam result. Beam cost grows with the number of occluder triangles "
+      "each shadow beam sees (\"visible occluder tris/px\"; the paper's value in parentheses), so scenes "
+      "where ours is much higher than the paper's (plant, conference) are harder workloads than the paper's.\n")
     w("| scene | beam time | rays (256) time | speed-up | beams: kd steps/px | beams: isect/px | beams: hits/px | "
-      "visible occluder tris/px | rays (256): kd steps/px | rays (256): isect/px | equal-time rays | paper: beam / 256 rays / equal time |")
+      "visible occluder tris/px (paper) | rays (256): kd steps/px | rays (256): isect/px | equal-time rays | paper: beam / 256 rays / equal time |")
     w("|---|---|---|---|---|---|---|---|---|---|---|---|")
     scenes = OrderedDict()
     for r in ss:
@@ -181,7 +186,8 @@ if ss:
                   + (f", RMSE {float(e['rmse']):.3f}" if e else ""))
         p = PAPER_SOFT.get(sc)
         w(f"| {sc} | {bt:.2f} s | {rt:.2f} s | {rt / bt:.1f}x | {fmt(num(b, 'kd_steps') / px)} | "
-          f"{fmt(num(b, 'tri_tests') / px)} | {fmt(num(b, 'hits') / px)} | {fmt(num(b, 'shadow_vis_tris') / px)} | "
+          f"{fmt(num(b, 'tri_tests') / px)} | {fmt(num(b, 'hits') / px)} | {fmt(num(b, 'shadow_vis_tris') / px)} "
+          f"({PAPER_SOFT_VIS.get(sc, '-')}) | "
           f"{fmt(num(r256[0], 'kd_steps') / px) if r256 else '-'} | {fmt(num(r256[0], 'tri_tests') / px) if r256 else '-'} | "
           f"{eq} | {' / '.join(p) if p else '-'} |")
     w("")

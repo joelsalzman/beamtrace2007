@@ -1,6 +1,8 @@
 // One-ray-at-a-time kd-tree traversal and ray-triangle test (host and device).
 #pragma once
 
+#include <limits>
+
 #include "beam/beam_types.h"
 #include "util/stats.h"
 
@@ -105,13 +107,17 @@ BT_HD inline bool rayTraverse(const SceneView& sv, const Ray& ray, RayHit& hit, 
         hit.t = th;
         return true;
       }
-      Real tol = bestTri < 0 ? Real(0) : best * kEpsRel;
+      // Ties (coplanar overlaps) only within a few ulps: anything larger is a
+      // genuinely closer surface.
+      Real tol = bestTri < 0 ? Real(0) : best * (4 * std::numeric_limits<Real>::epsilon());
       if (bestTri < 0 || th < best - tol || (th <= best + tol && t < bestTri)) {
         best = th;
         bestTri = t;
       }
     }
-    if (bestTri >= 0 && best <= t1 * (1 + kEpsRel)) break;
+    // Stop only if the hit lies inside this leaf: a hit slightly beyond it can
+    // still be beaten by a closer surface in the next leaf.
+    if (bestTri >= 0 && best <= t1) break;
     if (sp == 0) break;
     --sp;
     node = stack[sp].node;
