@@ -52,9 +52,10 @@ class GpuRenderer {
   // or, with useWavefront = false (environment BT_GPU_ENGINE=v1), the first
   // port's one thread per pixel.
   bool useWavefront = true;
-  int wfBudget = 256;                     // live sub-beams per pixel / shadow beam before it goes to the CPU
+  int wfBudget = 128;                     // live sub-beams per pixel / shadow beam before it goes to the CPU
   int wfPrimaryBudget = 4096;             // live sub-beams per primary tile
-  size_t wfCapacity = size_t(1) << 22;    // sub-beams per queue (3 queues of 64 B records)
+  size_t wfCapacity = size_t(1) << 23;    // sub-beams per queue (3 queues of 64 B records; reduced
+                                          // to fit in 40% of the free GPU memory)
   int lastRounds = 0, lastMaxQueue = 0;
 
   int lastOverflowPixels = 0;     // pixels recomputed on the CPU

@@ -193,7 +193,7 @@ __device__ void appendPoly(const Params& p, int root, const OutBeam& ob) {
 template <int App>
 struct WfOut {
   const Params* p;
-  __device__ void emit(int root, const Poly2& poly, int tri, Real area) {
+  __device__ void emit(int root, const PolyN<4>& poly, int tri, Real area) {
     const WfRoot& R = p->roots[root];
     if (App == kAppSoft) {
       if (tri >= 0) return;  // occluded
@@ -450,7 +450,10 @@ __global__ void __launch_bounds__(kBlock, 4) traceKernel(Params p, int cur) {
       int base = 0;
       if (lane == 0) base = atomicAdd(&p.st->splitCount, __popc(splits));
       base = __shfl_sync(kFull, base, 0);
-      if (res == kWfSplit) p.sq[base + __popc(splits & below)] = r;
+      if (res == kWfSplit) {
+        wfStoreGeom(w.b, r);  // (r's own corners are dead after wfExpand)
+        p.sq[base + __popc(splits & below)] = r;
+      }
     }
     WF_CYC(3);
   }

@@ -11,12 +11,15 @@ namespace bt {
 
 constexpr int kMaxPoly = 8;
 
-struct Poly2 {
-  Real x[kMaxPoly], y[kMaxPoly];
+// Convex polygon with room for N vertices (push ignores overflow; splitPoly
+// reports it).
+template <int N>
+struct PolyN {
+  Real x[N], y[N];
   int n = 0;
   BT_HD void clear() { n = 0; }
   BT_HD void push(Real px, Real py) {
-    if (n < kMaxPoly) {
+    if (n < N) {
       x[n] = px;
       y[n] = py;
       ++n;
@@ -48,6 +51,8 @@ struct Poly2 {
   }
 };
 
+using Poly2 = PolyN<kMaxPoly>;
+
 // Oriented line; L(q) > 0 is the "inside" half-plane. Normalized so that
 // (a, b) is a unit vector unless the line is degenerate (a = b = 0, constant c).
 struct Line2 {
@@ -73,15 +78,24 @@ BT_HD inline Line2 makeLine(Real a, Real b, Real c, Real ext) {
 // Splits convex `p` by line `L` with fuzzy tolerance `eps`: vertices with
 // |L| <= eps are "on" and go to both pieces; crossing points are computed
 // from the lexicographically smaller endpoint so neighbours agree bitwise.
-BT_HD inline void splitPoly(const Poly2& p, const Line2& L, Real eps, Poly2& in, Poly2& out) {
+// Returns false if a piece needed more than N vertices.
+template <int N>
+BT_HD inline bool splitPoly(const PolyN<N>& p, const Line2& L, Real eps, PolyN<N>& in, PolyN<N>& out) {
   in.clear();
   out.clear();
-  Real d[kMaxPoly];
-  int cls[kMaxPoly];
+  Real d[N];
+  int cls[N];
+  int nin = 0, nout = 0;
   for (int i = 0; i < p.n; ++i) {
     d[i] = L.eval(p.x[i], p.y[i]);
     cls[i] = d[i] > eps ? 1 : (d[i] < -eps ? -1 : 0);
   }
+  for (int i = 0; i < p.n; ++i) {
+    int j = i + 1 == p.n ? 0 : i + 1;
+    nin += (cls[i] >= 0) + (cls[i] * cls[j] < 0);
+    nout += (cls[i] <= 0) + (cls[i] * cls[j] < 0);
+  }
+  if (nin > N || nout > N) return false;
   for (int i = 0; i < p.n; ++i) {
     int j = i + 1 == p.n ? 0 : i + 1;
     if (cls[i] >= 0) in.push(p.x[i], p.y[i]);
@@ -96,6 +110,7 @@ BT_HD inline void splitPoly(const Poly2& p, const Line2& L, Real eps, Poly2& in,
       out.push(X, Y);
     }
   }
+  return true;
 }
 
 // Welds vertices that are (numerically) duplicate or collinear, within a
@@ -103,7 +118,8 @@ BT_HD inline void splitPoly(const Poly2& p, const Line2& L, Real eps, Poly2& in,
 // gaps between neighbouring beams. (Splitting never creates near-duplicates:
 // crossing points are only computed between vertices strictly farther than
 // eps from the line.) Leaves n = 0 if the polygon collapses.
-BT_HD inline void cleanPoly(Poly2& p, Real epsSplit) {
+template <int N>
+BT_HD inline void cleanPoly(PolyN<N>& p, Real epsSplit) {
   const Real eps = epsSplit * Real(1e-3);
   bool changed = true;
   while (changed && p.n >= 3) {

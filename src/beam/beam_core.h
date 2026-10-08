@@ -66,7 +66,8 @@ struct CoreFrame {
 };
 
 // Bit 0: some vertex strictly inside (L > eps); bit 1: some vertex strictly outside.
-BT_HD inline int classifyPoly(const Poly2& p, const Line2& L, Real eps) {
+template <int N>
+BT_HD inline int classifyPoly(const PolyN<N>& p, const Line2& L, Real eps) {
   int c = 0;
   for (int i = 0; i < p.n; ++i) {
     Real d = L.eval(p.x[i], p.y[i]);
@@ -77,7 +78,8 @@ BT_HD inline int classifyPoly(const Poly2& p, const Line2& L, Real eps) {
 }
 
 // Splits a convex pentagon into a quad and a triangle (paper Fig. 2h).
-BT_HD inline void splitFive(const Poly2& p, Poly2& a, Poly2& b) {
+template <int N>
+BT_HD inline void splitFive(const PolyN<N>& p, PolyN<N>& a, PolyN<N>& b) {
   a.clear();
   b.clear();
   for (int i = 0; i < 4; ++i) a.push(p.x[i], p.y[i]);
@@ -195,8 +197,9 @@ struct BeamCtx {
   // Corners and |w| per axis of a beam with cross-section `p` (convex,
   // <= 4 vertices). Returns false for slivers below minArea; `dropped` then
   // receives the polygon's area.
-  BT_HD bool beamGeom(const Poly2& p, const int8_t sgn[3], CoreBeam& b, Real& dropped) const {
-    Poly2 c = p;
+  template <int N>
+  BT_HD bool beamGeom(const PolyN<N>& p, const int8_t sgn[3], CoreBeam& b, Real& dropped) const {
+    PolyN<N> c = p;
     cleanPoly(c, eps);
     Real A = c.n >= 3 ? c.area() : Real(0);
     if (c.n < 3 || A < minArea) {
@@ -338,7 +341,8 @@ struct BeamCtx {
     return outAll != 0;
   }
 
-  BT_HD void beamToPoly(const CoreBeam& b, Poly2& p) const {
+  template <int N>
+  BT_HD void beamToPoly(const CoreBeam& b, PolyN<N>& p) const {
     p.n = b.n;
     for (int i = 0; i < b.n; ++i) {
       p.x[i] = b.qx[i];
@@ -410,8 +414,9 @@ struct BeamCtx {
   // Clips first by the edge that leaves the smallest remainder: later cuts
   // then act on smaller pieces, which shortens their extension lines across
   // the miss region (less fragmentation of later beams). Returns false if a
-  // push fails or the local stack overflows.
-  template <class Sink>
+  // push fails, the local stack overflows or a piece needs more than N
+  // vertices. (Pieces have <= 5: every polygon clipped has <= 4.)
+  template <int N = kMaxPoly, class Sink>
   BT_HD bool clipTri(const CoreBeam& B, Line2* L, int nl, bool orderEdges, Sink& sink, uint64_t& fiveSplits) const {
     if (orderEdges) {
       Real score[3];
@@ -427,7 +432,7 @@ struct BeamCtx {
         }
     }
     bool ok = true;
-    Poly2 stack[8];
+    PolyN<N> stack[8];
     int stackLine[8];
     int sp = 0;
     beamToPoly(B, stack[0]);
@@ -435,7 +440,7 @@ struct BeamCtx {
     sp = 1;
     while (sp > 0) {
       --sp;
-      Poly2 p = stack[sp];
+      PolyN<N> p = stack[sp];
       int li = stackLine[sp];
       bool inside = true;
       for (; li < nl; ++li) {
@@ -446,8 +451,8 @@ struct BeamCtx {
           inside = false;
           break;
         }
-        Poly2 in, out;
-        splitPoly(p, L[li], eps, in, out);
+        PolyN<N> in, out;
+        if (!splitPoly(p, L[li], eps, in, out)) return false;
         cleanPoly(out, eps);
         if (out.n >= 3 && !sink.push(0, out)) ok = false;
         cleanPoly(in, eps);
@@ -456,7 +461,7 @@ struct BeamCtx {
           break;
         }
         if (in.n == 5) {
-          Poly2 a, b;
+          PolyN<N> a, b;
           splitFive(in, a, b);
           fiveSplits++;
           if (sp >= 8) return false;

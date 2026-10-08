@@ -123,7 +123,7 @@ BT_HD inline void wfStoreGeom(const CoreBeam& b, WfBeam& r) {
 // A finished piece (BeamCore::output): out.emit(root, polygon, tri, area).
 template <class Out>
 BT_HD void wfOutput(const BeamCtx& c, const CoreBeam& b, int root, int tri, Out& out, TraceStats& st) {
-  Poly2 p;
+  PolyN<4> p;
   c.beamToPoly(b, p);
   Real area = p.area();
   if (tri >= 0) st.hits++;
@@ -309,7 +309,8 @@ struct WfPoly5 {
 struct WfClipSink {
   WfPoly5 p[2][kWfMaxClip];
   int n[2] = {0, 0};
-  BT_HD bool push(int l, const Poly2& q) {
+  template <int N>
+  BT_HD bool push(int l, const PolyN<N>& q) {
     if (n[l] >= kWfMaxClip || q.n > 5) return false;
     WfPoly5& d = p[l][n[l]++];
     d.n = q.n;
@@ -319,7 +320,8 @@ struct WfClipSink {
     }
     return true;
   }
-  BT_HD void get(int l, int i, Poly2& q) const {
+  template <int N>
+  BT_HD void get(int l, int i, PolyN<N>& q) const {
     const WfPoly5& d = p[l][i];
     q.n = d.n;
     for (int k = 0; k < d.n; ++k) {
@@ -344,9 +346,9 @@ BT_HD inline bool wfSplitClip(const BeamCtx& c, const WfBeam& r, WfWork& w, bool
   WfHitPlane hp{&w};
   c.classifyTri(w.b, ti, hp, L, nl, reason);  // kTriClip, as in wfTrace
   sink.n[0] = sink.n[1] = 0;
-  if (!c.clipTri(w.b, L, nl, orderEdges, sink, st.fiveSplits)) return false;
+  if (!c.clipTri<6>(w.b, L, nl, orderEdges, sink, st.fiveSplits)) return false;
   Real newArea = 0;
-  Poly2 q;
+  PolyN<5> q;
   for (int i = 0; i < sink.n[1]; ++i) {
     sink.get(1, i, q);
     newArea += q.area();
@@ -384,9 +386,9 @@ BT_HD void wfSplitEmit(const BeamCtx& c, const WfBeam& r, const WfWork& w, const
     const bool queued = !(hitNow && c.q.mode == BeamMode::AnyHit);
     const int hit = hitNow ? t : parent.hit;
     for (int i = 0; i < sink.n[l]; ++i) {
-      Poly2 p0;
+      PolyN<5> p0;
       sink.get(l, i, p0);
-      Poly2 sub[2];
+      PolyN<5> sub[2];
       int ns = 1;
       if (p0.n == 5) {
         splitFive(p0, sub[0], sub[1]);

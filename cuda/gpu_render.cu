@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "beam/beam_core.h"
+#include "beam/wavefront_core.h"
 #include "cuda/gpu_common.cuh"
 #include "ray/ray_core.h"
 #include "render/soft_core.h"
@@ -512,6 +513,14 @@ GpuRenderer::GpuRenderer(const Scene& scene, const KdTree& tree) : impl_(new Imp
   // Local memory for the per-thread beam storage.
   BT_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 4096));
   if (const char* e = getenv("BT_GPU_ENGINE")) useWavefront = std::strcmp(e, "v1") != 0;
+  // Queues: at most 40% of the free memory. (Capacity / budget = roots in
+  // flight; 64K pixels was the measured sweet spot on a 34-SM GPU.)
+  size_t freeB = 0, totalB = 0;
+  if (cudaMemGetInfo(&freeB, &totalB) == cudaSuccess)
+    wfCapacity = std::max(size_t(1) << 16, std::min(wfCapacity, size_t(double(freeB) * 0.4) / (3 * sizeof(WfBeam))));
+  // Tuning overrides for the wavefront engine.
+  if (const char* e = getenv("BT_WF_BUDGET")) wfBudget = std::max(1, atoi(e));
+  if (const char* e = getenv("BT_WF_CAPACITY")) wfCapacity = size_t(std::max(1024L, atol(e)));
 }
 
 GpuRenderer::~GpuRenderer() {

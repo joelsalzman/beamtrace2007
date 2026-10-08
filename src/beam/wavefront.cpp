@@ -9,7 +9,7 @@ namespace {
 struct HostOut {
   std::vector<WfRootResult>* res;
   bool keep;
-  void emit(int root, const Poly2& p, int tri, Real area) {
+  void emit(int root, const PolyN<4>& p, int tri, Real area) {
     WfRootResult& r = (*res)[size_t(root)];
     if (tri >= 0)
       r.hitArea += double(area);

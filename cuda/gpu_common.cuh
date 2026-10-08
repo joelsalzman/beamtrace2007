@@ -50,8 +50,8 @@ struct GpuRenderer::Impl {
 
 // The wavefront engine (wavefront.cu).
 struct WfConfig {
-  int budget = 256;            // live sub-beams per root
-  size_t capacity = 1u << 22;  // sub-beam records per queue
+  int budget = 128;            // live sub-beams per root
+  size_t capacity = 1u << 23;  // sub-beam records per queue
   int roundsPerCheck = 8;      // rounds launched between host checks for completion
 };
 
