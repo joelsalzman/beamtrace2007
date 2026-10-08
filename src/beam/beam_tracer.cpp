@@ -60,6 +60,7 @@ BeamTracer::BeamTracer(const Scene& scene, const KdTree& tree)
       core_(makeSceneView(scene, tree), store_),
       stats(core_.stats),
       useMailbox(core_.useMailbox),
+      useTrail(core_.useTrail),
       keepOutput(store_.keepOutput),
       orderEdges(core_.orderEdges),
       lastReason(core_.lastReason) {}

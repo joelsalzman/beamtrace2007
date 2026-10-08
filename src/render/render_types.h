@@ -54,6 +54,7 @@ struct SoftOptions {
   bool jitter = true;
   int threads = 1;
   bool mailbox = true;
+  bool trail = false;       // beams: restart-trail continuation instead of the frame stack
 };
 
 struct SoftResult {

@@ -20,6 +20,7 @@ struct TraceStats {
   uint64_t fiveSplits = 0;    // pentagons split into quad + triangle (4-corner limit)
   uint64_t visibleTris = 0;   // distinct triangles hit, summed over beam trees
   uint64_t rays = 0;          // rays traced
+  uint64_t climbs = 0;        // parent hops of the stackless (restart-trail) traversal
   double droppedArea = 0;     // cross-section area lost to degenerate slivers (plane units)
 
   BT_HD void add(const TraceStats& o) {
@@ -35,6 +36,7 @@ struct TraceStats {
     fiveSplits += o.fiveSplits;
     visibleTris += o.visibleTris;
     rays += o.rays;
+    climbs += o.climbs;
     droppedArea += o.droppedArea;
   }
 };

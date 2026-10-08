@@ -38,6 +38,10 @@ class KdTree {
   std::vector<KdNode> nodes;
   std::vector<uint32_t> triIndices;
   AABB bounds;
+  // For stackless (restart-trail) traversal: each node's parent (root: ~0u)
+  // and box, computed exactly as a descent from `bounds` computes them.
+  std::vector<uint32_t> parent;
+  std::vector<AABB> nodeBox;
 
   // Build statistics.
   int numLeaves = 0;

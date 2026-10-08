@@ -74,11 +74,17 @@ void report(const char* scene, const char* what, uint64_t out, const TraceStats&
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    fprintf(stderr, "usage: bt_golden CONFIG...\n");
+  int first = 1;
+  bool trail = false;
+  if (argc > 1 && std::strcmp(argv[1], "--trail") == 0) {
+    trail = true;
+    first = 2;
+  }
+  if (argc <= first) {
+    fprintf(stderr, "usage: bt_golden [--trail] CONFIG...\n");
     return 2;
   }
-  for (int i = 1; i < argc; ++i) {
+  for (int i = first; i < argc; ++i) {
     SceneConfig cfg;
     std::string err;
     Scene scene;
@@ -93,6 +99,7 @@ int main(int argc, char** argv) {
     const char* name = cfg.name.c_str();
     Camera cam = Camera::make(cfg.views[0], cfg.up, 256, 256);
     BeamTracer bt(scene, tree);
+    bt.useTrail = trail;
     for (int mb = 1; mb >= 0; --mb) {
       bt.useMailbox = mb != 0;
       BeamOutput prim;
@@ -117,6 +124,7 @@ int main(int argc, char** argv) {
         so.threads = 1;
         so.mailbox = c != 1;
         so.exact = c == 2;
+        so.trail = trail;
         SoftResult res;
         softShadows(scene, tree, sc, L, so, res);
         Hash h;

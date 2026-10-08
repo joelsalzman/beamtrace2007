@@ -78,6 +78,8 @@ struct SceneView {
   const Vec3* triN = nullptr;
   const KdNode* nodes = nullptr;
   const uint32_t* triIndices = nullptr;
+  const uint32_t* parent = nullptr;  // kd node parents (restart-trail traversal)
+  const AABB* nodeBox = nullptr;     // kd node boxes
   AABB bounds;
   int numTris = 0;
 };
@@ -89,6 +91,8 @@ inline SceneView makeSceneView(const Scene& s, const KdTree& t) {
   v.triN = s.triN.data();
   v.nodes = t.nodes.data();
   v.triIndices = t.triIndices.data();
+  v.parent = t.parent.data();
+  v.nodeBox = t.nodeBox.data();
   v.bounds = t.bounds;
   v.numTris = s.numTris();
   return v;

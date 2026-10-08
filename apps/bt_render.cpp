@@ -29,7 +29,7 @@ struct Args {
   int rayAA = 1;       // primary rays per pixel for the ray tracer
   int samples = 256;   // shadow rays per pixel (soft shadows)
   int threads = 1;
-  bool exact = false, jitter = true, mailbox = true, wire = false, singleLeaf = false, quiet = false;
+  bool exact = false, jitter = true, mailbox = true, trail = false, wire = false, singleLeaf = false, quiet = false;
   bool writePfm = false;
   bool info = false;
   double lightScale = 1;
@@ -46,7 +46,7 @@ void usage() {
   fprintf(stderr,
           "usage: bt_render --config FILE [--view N | --views all] [--mode primary|pointshadow|softshadow]\n"
           "                 [--method beam|ray] [--res WxH] [--aa N] [--ray-aa N] [--samples N] [--threads N]\n"
-          "                 [--exact] [--no-jitter] [--no-mailbox] [--light-scale S] [--cull 0|1]\n"
+          "                 [--exact] [--no-jitter] [--no-mailbox] [--trail] [--light-scale S] [--cull 0|1]\n"
           "                 [--out PREFIX] [--wire] [--pfm] [--csv FILE] [--tag STR] [--kd-single-leaf] [--quiet] [--info]\n"
           "                 [--device cpu|cuda]  (cuda: soft shadows on the GPU; bt_render_cuda only)\n");
 }
@@ -76,6 +76,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
     else if (s == "--exact") a.exact = true;
     else if (s == "--no-jitter") a.jitter = false;
     else if (s == "--no-mailbox") a.mailbox = false;
+    else if (s == "--trail") a.trail = true;
     else if (s == "--light-scale") a.lightScale = std::atof(next().c_str());
     else if (s == "--cull") a.cull = std::atoi(next().c_str());
     else if (s == "--out") a.out = next();
@@ -186,6 +187,7 @@ int main(int argc, char** argv) {
   }
   BeamTracer btr(scene, tree);
   btr.useMailbox = a.mailbox;
+  btr.useTrail = a.trail;
 #ifdef BT_WITH_CUDA
   GpuRenderer* gpu = nullptr;
   if (a.device == "cuda") {
@@ -285,6 +287,7 @@ int main(int argc, char** argv) {
       so.jitter = a.jitter;
       so.threads = a.threads;
       so.mailbox = a.mailbox;
+      so.trail = a.trail;
       SoftResult res;
 #ifdef BT_WITH_CUDA
       if (gpu && so.useBeams) {

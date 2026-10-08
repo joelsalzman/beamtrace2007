@@ -134,6 +134,7 @@ class BeamTracer {
  public:
   TraceStats& stats;
   bool& useMailbox;
+  bool& useTrail;    // restart-trail continuation instead of the frame stack
   bool& keepOutput;  // if false only areas are accumulated (soft shadows)
   bool& orderEdges;  // clip by the most-cutting triangle edge first
   int& lastReason;

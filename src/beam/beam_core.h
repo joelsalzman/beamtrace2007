@@ -52,7 +52,9 @@ struct CoreTriInfo {
 struct CoreWork {
   int beam;
   uint32_t node;
-  int frame;
+  int frame;       // frame-stack continuation (BeamCore::useTrail == false)
+  int depth;       // restart-trail continuation: depth of `node` ...
+  uint64_t trail;  // ... and bit d set for each pending far child at depth d
   AABB box;
 };
 
@@ -81,6 +83,15 @@ BT_HD inline void splitFive(const Poly2& p, Poly2& a, Poly2& b) {
   b.push(p.x[0], p.y[0]);
   b.push(p.x[3], p.y[3]);
   b.push(p.x[4], p.y[4]);
+}
+
+// Index of the highest set bit (x != 0).
+BT_HD inline int highestBit(uint64_t x) {
+#ifdef __CUDA_ARCH__
+  return 63 - __clzll((long long)x);
+#else
+  return 63 - __builtin_clzll((unsigned long long)x);
+#endif
 }
 
 // Optional per-phase cycle counters (device profiling with -DBT_PROFILE_CYCLES;
@@ -523,6 +534,11 @@ class BeamCore {
   long long cyc[4] = {0, 0, 0, 0};  // descent, leaf, advance, root setup (device only)
   bool useMailbox = true;
   bool orderEdges = true;  // clip by the most-cutting triangle edge first
+  // Continuation of a beam after a leaf: false = the paper's stack of pending
+  // far children (frames shared by all pieces of a leaf); true = a restart
+  // trail, i.e. one bit per pending far child (depth) plus parent links. The
+  // two visit the same cells in the same order.
+  bool useTrail = false;
   int lastReason = 0;      // deciding step of the last intersect() (tests)
 
   // Traces convex root polygons (plane coordinates) through the scene.
@@ -547,12 +563,16 @@ class BeamCore {
       st_.truncateFrames(bmax(w.frame, st_.maxPendingFrame()) + 1);
       uint32_t node = w.node;
       AABB box = w.box;
-      int frame = w.frame;
+      Cont cont;
+      cont.frame = w.frame;
+      cont.depth = w.depth;
+      cont.trail = w.trail;
       long long c1 = btClock();
       for (;;) {
         const KdNode& kn = c_.sv.nodes[node];
         if (kn.isLeaf()) break;
         stats.kdSteps++;
+        const int d = cont.depth++;
         const int a = kn.axis();
         const Real s = kn.split;
         const CoreBeam& B = st_.beam(w.beam);
@@ -579,26 +599,31 @@ class BeamCore {
           node = cs;
           box = bs;
         } else {
-          CoreFrame f;
-          f.node = cs;
-          f.parent = frame;
-          f.box = bs;
-          int fi = st_.pushFrame(f);
-          if (fi < 0) {
-            st_.overflow = true;
-            return;
+          if (useTrail) {
+            cont.trail |= uint64_t(1) << d;
+          } else {
+            CoreFrame f;
+            f.node = cs;
+            f.parent = cont.frame;
+            f.box = bs;
+            int fi = st_.pushFrame(f);
+            if (fi < 0) {
+              st_.overflow = true;
+              return;
+            }
+            cont.frame = fi;
           }
-          frame = fi;
           node = co;
           box = bo;
         }
       }
+      cont.node = node;
       long long c2 = btClock();
       cyc[0] += c2 - c1;
       const KdNode& leaf = c_.sv.nodes[node];
       if (leaf.count() == 0) {  // empty leaf: just move on
         stats.leafVisits++;
-        advance(w.beam, frame);
+        advance(w.beam, cont);
         cyc[2] += btClock() - c2;
         continue;
       }
@@ -606,7 +631,7 @@ class BeamCore {
       long long c3 = btClock();
       cyc[1] += c3 - c2;
       const int n = st_.listSize(cur_);
-      for (int i = 0; i < n && !st_.overflow; ++i) advance(st_.listAt(cur_, i), frame);
+      for (int i = 0; i < n && !st_.overflow; ++i) advance(st_.listAt(cur_, i), cont);
       cyc[2] += btClock() - c3;
     }
   }
@@ -862,20 +887,59 @@ class BeamCore {
     for (int k = 0; k < n; ++k) st_.beam(st_.listAt(cur_, k)).mbox = E;
   }
 
-  BT_HD void advance(int beamIdx, int frame) {
-    int f = frame;
-    while (f >= 0) {
-      const CoreFrame& fr = st_.frame(f);
-      if (c_.overlaps(st_.beam(beamIdx), fr.box)) {
-        CoreWork w;
-        w.beam = beamIdx;
-        w.node = fr.node;
-        w.frame = fr.parent;
-        w.box = fr.box;
-        if (!st_.pushWork(w)) st_.overflow = true;
-        return;
+  // Where a beam continues after leaving the leaf `node`.
+  struct Cont {
+    int frame;       // innermost pending frame (frame stack)
+    uint32_t node;   // the leaf (restart trail)
+    int depth;       // its depth
+    uint64_t trail;  // pending far children by depth
+  };
+
+  // Queues the beam at the next pending far child it overlaps (innermost
+  // first), or finalizes it.
+  BT_HD void advance(int beamIdx, const Cont& c) {
+    CoreWork w;
+    w.beam = beamIdx;
+    if (!useTrail) {
+      int f = c.frame;
+      while (f >= 0) {
+        const CoreFrame& fr = st_.frame(f);
+        if (c_.overlaps(st_.beam(beamIdx), fr.box)) {
+          w.node = fr.node;
+          w.frame = fr.parent;
+          w.box = fr.box;
+          w.depth = 0;
+          w.trail = 0;
+          if (!st_.pushWork(w)) st_.overflow = true;
+          return;
+        }
+        f = fr.parent;
       }
-      f = fr.parent;
+    } else {
+      uint32_t node = c.node;
+      int depth = c.depth;
+      uint64_t trail = c.trail;
+      const CoreBeam& b = st_.beam(beamIdx);
+      while (trail != 0) {
+        const int d = highestBit(trail);
+        for (; depth > d; --depth) {
+          node = c_.sv.parent[node];
+          stats.climbs++;
+        }
+        trail &= (uint64_t(1) << d) - 1;
+        const KdNode& kn = c_.sv.nodes[node];
+        const uint32_t cs = b.sgn[kn.axis()] > 0 ? kn.right() : node + 1;
+        const AABB& box = c_.sv.nodeBox[cs];
+        if (c_.overlaps(b, box)) {
+          w.node = cs;
+          w.frame = -1;
+          w.box = box;
+          w.depth = d + 1;
+          w.trail = trail;
+          if (!st_.pushWork(w)) st_.overflow = true;
+          return;
+        }
+      }
     }
     finalize(beamIdx);
   }
@@ -901,6 +965,8 @@ class BeamCore {
       w.beam = idx;
       w.node = 0;
       w.frame = -1;
+      w.depth = 0;
+      w.trail = 0;
       w.box = c_.sv.bounds;
       if (!st_.pushWork(w)) {
         st_.overflow = true;

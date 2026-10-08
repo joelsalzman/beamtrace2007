@@ -255,7 +255,28 @@ void KdTree::build(const Scene& scene, const KdBuildParams& params) {
   Builder builder(scene, params, *this);
   int N = std::max(1, scene.numTris());
   builder.maxDepth_ = params.maxDepth >= 0 ? params.maxDepth : int(8 + 1.3 * std::log2(double(N)));
+  // Inner nodes then have depth <= 62, so a restart trail fits in 64 bits.
+  builder.maxDepth_ = std::min(builder.maxDepth_, 63);
   builder.build(refs, bounds, 0);
+  parent.assign(nodes.size(), ~0u);
+  nodeBox.assign(nodes.size(), AABB());
+  nodeBox[0] = bounds;
+  std::vector<uint32_t> stack(1, 0u);
+  while (!stack.empty()) {
+    const uint32_t i = stack.back();
+    stack.pop_back();
+    const KdNode& n = nodes[i];
+    if (n.isLeaf()) continue;
+    const int a = n.axis();
+    const uint32_t l = i + 1, r = n.right();
+    nodeBox[l] = nodeBox[i];
+    nodeBox[l].hi[a] = n.split;
+    nodeBox[r] = nodeBox[i];
+    nodeBox[r].lo[a] = n.split;
+    parent[l] = parent[r] = i;
+    stack.push_back(l);
+    stack.push_back(r);
+  }
   buildSeconds = timer.seconds();
 }
 

@@ -423,6 +423,7 @@ void softShadows(const Scene& scene, const KdTree& tree, const Camera& cam, cons
   auto worker = [&](int id) {
     BeamTracer btr(scene, tree);
     btr.useMailbox = opt.mailbox;
+    btr.useTrail = opt.trail;
     btr.keepOutput = false;
     for (int y = nextRow++; y < H; y = nextRow++) {
       for (int x = 0; x < W; ++x) {
@@ -495,6 +496,7 @@ void softShadowPixelsCPU(const Scene& scene, const KdTree& tree, const AreaLight
   auto worker = [&](int id) {
     BeamTracer btr(scene, tree);
     btr.useMailbox = opt.mailbox;
+    btr.useTrail = opt.trail;
     btr.keepOutput = false;
     for (size_t i = next++; i < pixels.size(); i = next++) {
       size_t k = pixels[i];
