@@ -302,15 +302,22 @@ try:
         fig, ax = plt.subplots(figsize=(6.4, 4.2), facecolor=SURF)
         x = [d[1] for d in data]
         y = [d[idx] for d in data]
-        ax.scatter(x, y, s=36, color=S1, edgecolors=SURF, linewidths=1.5, zorder=3)
-        # direct labels: one per scene, at its largest point
-        last = {}
+        keep = [(a, b) for a, b in zip(x, y) if a > 0 and b > 0]
+        ax.scatter([a for a, _ in keep], [b for _, b in keep], s=36, color=S1, edgecolors=SURF, linewidths=1.5,
+                   zorder=3)
+        # Scenes span three decades: log-log, one direct label per scene at its
+        # cluster's (geometric) centre.
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        groups = {}
         for d in data:
-            if d[0] not in last or d[1] > last[d[0]][1]:
-                last[d[0]] = d
-        for sc, d in last.items():
-            ax.annotate(sc, (d[1], d[idx]), xytext=(6, 4), textcoords="offset points", color=INK2, fontsize=9)
-        style(ax, title, "visible triangles per frame", ylab)
+            if d[1] > 0 and d[idx] > 0:
+                groups.setdefault(d[0], []).append((d[1], d[idx]))
+        for sc, pts in groups.items():
+            gx = math.exp(sum(math.log(a) for a, _ in pts) / len(pts))
+            gy = math.exp(sum(math.log(b) for _, b in pts) / len(pts))
+            ax.annotate(sc, (gx, gy), xytext=(8, -12), textcoords="offset points", color=INK2, fontsize=9)
+        style(ax, title + " (log-log)", "visible triangles per frame", ylab)
         fig.tight_layout()
         fig.savefig(os.path.join(OUT, fname), dpi=130)
         plt.close(fig)
