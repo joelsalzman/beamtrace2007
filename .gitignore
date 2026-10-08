@@ -3,3 +3,4 @@ scenes/downloaded/
 results/
 *.pfm
 .vscode/
+__pycache__/
